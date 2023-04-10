@@ -1,2 +1,2 @@
-from FreeCAD.GPTAddOn import gpt
+from FreeCAD.GPT4FreeCAD import gpt
 gpt.show_gpt_command_dialog()
