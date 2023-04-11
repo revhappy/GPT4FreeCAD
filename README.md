@@ -40,6 +40,7 @@ into:
 
 This project is licensed under the [MIT License](LICENSE).
 
+Copyright (c) 2023 Robb Sharma
 ## Links
 
 - [GitHub Repository](https://github.com/revhappy/GPT4FreeCAD)
