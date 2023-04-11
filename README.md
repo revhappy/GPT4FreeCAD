@@ -1,6 +1,6 @@
 # GPT4FreeCAD
 
-A FreeCAD plug in that integrates OpenAI's GPT-4 model to generate Python scripts for creating sketches & 3D shapes based on user input.
+A FreeCAD plug in that integrates OpenAI's GPT-4 model to generate Python scripts for creating sketches & 3D models based on user input.
 
 *Requirements:  Python, Open AI API key
 
