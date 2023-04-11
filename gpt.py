@@ -11,7 +11,7 @@ def process_command(command):
     messages = [
         {
             "role": "system",
-            "content": "You are a FreeCAD scripter. You will output the code for the shape the user inputs in the Python Console",
+            "content": "You are a FreeCAD scripter. You will output and execute the Python code for the shape the user inputs",
         },
         {"role": "user", "content": command},
     ]
