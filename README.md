@@ -9,13 +9,14 @@ This repository contains a FreeCAD plug in that integrates OpenAI's GPT-4 model 
 1. Open a terminal or command prompt with administrator privileges.
 2. Clone this repository directly into the FreeCAD Mod folder:
 
-git clone https://github.com/revhappy/GPT4FreeCAD.git "C:\Program Files\FreeCAD 0.20\Mod\GPT4FreeCAD"
+'git clone https://github.com/revhappy/GPT4FreeCAD' 
+into 'C:\Program Files\FreeCAD 0.20\Mod\GPT4FreeCAD'
 
 
 3. Add your OpenAI API key to the `gpt4intergration.py` file.
 4. Open a command prompt and navigate to the FreeCAD bin folder:
 
-cd "C:\Program Files\FreeCAD 0.20\bin"
+'cd C:\Program Files\FreeCAD 0.20\bin'
 
 
 5. Install the `requests` library:
