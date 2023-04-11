@@ -1,8 +1,8 @@
 # GPT-4-FreeCAD
 
-# GPT-4-FreeCAD
+This repository contains a FreeCAD plug in that integrates OpenAI's GPT-4 model to generate Python scripts for creating 3D shapes based on user input.
 
-This repository contains a FreeCAD Add-On that integrates OpenAI's GPT model to generate Python scripts for creating 3D shapes based on user input.
+*Requirements:  Python, Open AI API key
 
 ## Installation
 
