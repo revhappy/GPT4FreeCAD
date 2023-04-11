@@ -19,7 +19,7 @@ C:\Program Files\FreeCAD 0.20\Mod\GPT4FreeCAD
 3. Add your OpenAI API key to the `gpt4intergration.py` file.
 4. Open a command prompt and navigate to the FreeCAD bin folder:
 
-`cd C:\Program Files\FreeCAD 0.20\bin
+`cd C:\Program Files\FreeCAD 0.20\bin'
 
 
 5. Install the `requests` library:
