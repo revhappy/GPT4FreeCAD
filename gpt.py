@@ -26,12 +26,12 @@ class GPTCommandDialog(QtWidgets.QDialog):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("GPT Command Input")
-        self.resize(400, 150)
+        self.setWindowTitle("GPT4FreeCAD Input")
+        self.resize(600, 150)
 
         self.verticalLayout = QtWidgets.QVBoxLayout(self)
 
-        self.label = QtWidgets.QLabel("Enter your command:")
+        self.label = QtWidgets.QLabel("Describe your part:")
         self.verticalLayout.addWidget(self.label)
 
         self.command_input = QtWidgets.QLineEdit()
