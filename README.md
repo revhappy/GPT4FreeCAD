@@ -9,10 +9,10 @@ This repository contains a FreeCAD plug in that integrates OpenAI's GPT-4 model 
 1. Open a terminal or command prompt with administrator privileges.
 2. Clone this repository directly into the FreeCAD Mod folder:
 
-git clone https://github.com/revhappy/GPT4FreeCAD.git
+`git clone https://github.com/revhappy/GPT4FreeCAD`
 
-
-C:\Program Files\FreeCAD 0.20\Mod\GPT4FreeCAD
+into:
+`cd C:\Program Files\FreeCAD 0.20\Mod`
 
 
 
