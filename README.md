@@ -1,3 +1,19 @@
+# GPT-4-FreeCAD
+
+This repository contains a FreeCAD Add-On that integrates OpenAI's GPT model to generate Python scripts for creating 3D shapes based on user input.
+
+## Installation
+
+1. Clone this repository into a folder on your desktop.
+2. Add your OpenAI API key to the `gpt4intergration.py` file.
+3. Copy all files into the FreeCAD Mod folder, generally found at this path: `C:\Program Files\FreeCAD 0.20\Mod`. Grant admin privileges if necessary.
+4. Open a command prompt and navigate to the FreeCAD bin folder:
+
+
+5. Install the `requests` library:
+
+
+
 
 ## Usage
 
