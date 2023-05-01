@@ -14,12 +14,11 @@ A FreeCAD plug in that integrates OpenAI's GPT-4 model to generate Python script
 into:
 `C:\Program Files\FreeCAD 0.20\Mod`
 
-3. Add your OpenAI API key to the `gpt4intergration.py` file.
-4. Open a command prompt and navigate to the FreeCAD bin folder:
+3. Open a command prompt and navigate to the FreeCAD bin folder:
 
 `cd C:\Program Files\FreeCAD 0.20\bin`
 
-5. Install the `requests` library:
+4. Install the `requests` library:
 
 `python -m pip install requests`
 
