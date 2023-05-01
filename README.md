@@ -35,6 +35,10 @@ into:
 2. Click on the "Macros" tab.
 3. Follow the directions to add the macro to your toolbar.
 
+### Updates
+
+05/01/23 - Memory Retention
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
