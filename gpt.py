@@ -15,6 +15,10 @@ def process_command(command, conversation_history):
     response_text = generate_chat_completion(messages, max_tokens=4000)
     return response_text
 
+def ensure_active_document():
+    if not App.ActiveDocument:
+        App.newDocument("Unnamed")
+
 class GPTCommandDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super(GPTCommandDialog, self).__init__(parent)
@@ -71,6 +75,8 @@ class GPTCommandDialog(QtWidgets.QDialog):
 
             self.command_input.clear()
 
+            ensure_active_document()
+
             # Check if the response contains code
             if "```python" in response_text and "\n```" in response_text:
                 # Split the response into description and code parts
@@ -84,7 +90,6 @@ class GPTCommandDialog(QtWidgets.QDialog):
                 exec(code, {"App": App, "Part": Part, "Base": Base})
         except Exception as e:
             App.Console.PrintError(f"Error: {str(e)}\n")
-
     def undo_last_command(self):
         if App.ActiveDocument is not None:
             App.ActiveDocument.undo()
