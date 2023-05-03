@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Package>
+    <Name>GPT4FreeCAD</Name>
+    <Icon>logo.svg</Icon>
+    <Repository>https://github.com/revhappy/GPT4FreeCAD.git</Repository>
+    <Readme>https://github.com/revhappy/GPT4FreeCAD/blob/master/README.md</Readme>
+</Package>
