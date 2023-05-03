@@ -2,7 +2,11 @@
 
 A FreeCAD plug in that integrates OpenAI's GPT-4 model to generate Python scripts for creating sketches & 3D models based on user input.
 
-*Requirements:  Python, Open AI API key
+![Workbench Logo](logo.svg)
+
+## Requirements
+- Python
+- Open AI API key
 
 ## Installation
 
@@ -34,10 +38,6 @@ into:
 1. In FreeCAD, go to `Tools > Customize...`.
 2. Click on the "Macros" tab.
 3. Follow the directions to add the macro to your toolbar.
-
-### Updates
-
-05/01/23 - Memory Retention
 
 ## License
 
