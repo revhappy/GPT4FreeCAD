@@ -39,6 +39,13 @@ into:
 2. Click on the "Macros" tab.
 3. Follow the directions to add the macro to your toolbar.
 
+## Tips
+
+Yes, the model can fail and present a blank screen or something random.  
+You can turn on Report View, I have it set up to show the python code along with any errors.
+In case of failure, merely prompt 'try again' or copy and paste the error into the prompt screen.
+These are early days, be patient :p
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
