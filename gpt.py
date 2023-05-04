@@ -89,18 +89,30 @@ class GPTCommandDialog(QtWidgets.QDialog):
                 # Execute the generated code in the Python environment
                 exec(code, {"App": App, "Part": Part, "Base": Base})
         except Exception as e:
-            App.Console.PrintError(f"Error: {str(e)}\n")
+                        App.Console.PrintError(f"Error: {str(e)}\n")
+            
     def undo_last_command(self):
         if App.ActiveDocument is not None:
-            App.ActiveDocument.undo()
+            if App.ActiveDocument.UndoCount > 0:
+                App.ActiveDocument.undo()
+                App.Console.PrintMessage(f"Undid the last command.\n")
+            else:
+                App.Console.PrintError(f"No actions to undo.\n")
+
+
+
 
 def show_gpt_command_dialog():
     dialog = GPTCommandDialog(Gui.getMainWindow())
     dialog.show()
 
-from PySide2.QtCore import QTimer
+from PySide2.QtCore import QCoreApplication, QMetaObject, QTimer
+
+def delayed_show_dialog():
+    dialog = GPTCommandDialog(Gui.getMainWindow())
+    dialog.show()
 
 timer = QTimer()
 timer.setSingleShot(True)
-timer.timeout.connect(show_gpt_command_dialog)
+timer.timeout.connect(delayed_show_dialog)
 timer.start(0)
