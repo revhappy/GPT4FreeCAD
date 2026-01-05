@@ -1,46 +1,44 @@
-import requests
-import json
-import os
-from PySide2 import QtWidgets
+"""
+Legacy GPT-4 integration module.
+DEPRECATED: Use ai_providers module instead.
 
-def ask_for_api_key():
-    api_key, ok = QtWidgets.QInputDialog.getText(None, "API Key", "Enter your OpenAI API key:")
-    if ok and api_key:
-        with open(os.path.join(os.path.expanduser("~"), "api_key.txt"), "w") as api_key_file:
-            api_key_file.write(api_key)
-        return api_key
-    else:
-        raise ValueError("API key not provided. Please enter a valid OpenAI API key.")
+This module is kept for backwards compatibility.
+"""
 
-# Read API key from file or ask the user for it
-api_key_path = os.path.join(os.path.expanduser("~"), "api_key.txt")
-if os.path.exists(api_key_path):
-    with open(api_key_path, "r") as api_key_file:
-        API_KEY = api_key_file.read().strip()
-else:
-    API_KEY = ask_for_api_key()
+import warnings
+from ai_providers import get_provider
+from config import get_config, ask_for_api_key
 
-API_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+# Show deprecation warning when imported
+warnings.warn(
+    "gpt4_integration is deprecated. Use ai_providers module instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
 
 def generate_chat_completion(messages, model="gpt-4", temperature=0.3, max_tokens=None):
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_KEY}",
-    }
+    """
+    Legacy function for generating chat completions.
+    Redirects to new provider system.
 
-    data = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-    }
+    DEPRECATED: Use ai_providers.get_provider('openai').generate_completion() instead.
+    """
+    config = get_config()
+    provider = get_provider("openai")
 
-    if max_tokens is not None:
-        data["max_tokens"] = max_tokens
+    # Get API key
+    api_key = config.get_api_key("openai")
+    if not api_key:
+        api_key = ask_for_api_key("openai", "OpenAI")
+        if not api_key:
+            raise ValueError("API key not provided for OpenAI")
 
-    response = requests.post(API_ENDPOINT, headers=headers, data=json.dumps(data))
+    provider.api_key = api_key
 
-    if response.status_code == 200:
-        return response.json()["choices"][0]["message"]["content"]
-    else:
-        raise Exception(f"Error {response.status_code}: {response.text}")
-
+    return provider.generate_completion(
+        messages,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens
+    )
