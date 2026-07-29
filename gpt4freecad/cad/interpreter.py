@@ -49,6 +49,23 @@ def _run_ops(operations, doc, objects: Dict[str, Any], log: List[str]):
     return result
 
 
+def _check_built(objects: Dict[str, Any]) -> None:
+    """Raise if any built object ended up with a null shape.
+
+    Parametric features (Part::Chamfer, Part::Fillet, ...) only compute on
+    doc.recompute(); an OCC failure there leaves a null shape instead of
+    raising, which would otherwise commit a silently-broken step.
+    """
+    for ir_name, obj in objects.items():
+        shape = getattr(obj, "Shape", None)
+        if shape is not None and shape.isNull():
+            kind = getattr(obj, "TypeId", "feature").split("::")[-1]
+            raise InterpreterError(
+                f"'{ir_name}' produced no geometry (the {kind} failed to "
+                "compute). Try a smaller size or different edges."
+            )
+
+
 def build_program(operations: List[Dict[str, Any]], doc=None,
                   group_separate: bool = False) -> Tuple[Any, List[str]]:
     """Build ``operations`` into ``doc`` (active document if None).
@@ -68,6 +85,7 @@ def build_program(operations: List[Dict[str, Any]], doc=None,
         if group_separate:
             _group_visible_components(doc, objects, log)
         doc.recompute()
+        _check_built(objects)
         doc.commitTransaction()
     except Exception as exc:  # noqa: BLE001 - report any build failure cleanly
         doc.abortTransaction()
@@ -105,6 +123,7 @@ def rebuild(program: List[Dict[str, Any]], doc=None,
             if group is not None:
                 objects["__assembly__"] = group
         doc.recompute()
+        _check_built(objects)
         doc.commitTransaction()
     except Exception as exc:  # noqa: BLE001
         doc.abortTransaction()
@@ -218,11 +237,33 @@ def _multi(kind):
 # --------------------------------------------------------------------------- #
 # Modifier handlers
 # --------------------------------------------------------------------------- #
+def _modifiable_edge_ids(shape):
+    """1-based indices of edges fillet/chamfer can act on.
+
+    Cylindrical/conical faces carry a *seam* edge (where the surface wraps
+    around) that belongs to only one face; OCC cannot fillet or chamfer those
+    and yields a null shape. So "all edges" means every non-degenerate edge
+    shared by two distinct faces.
+    """
+    ids = []
+    for i, edge in enumerate(shape.Edges, start=1):
+        if edge.Length < 1e-9:
+            continue  # degenerate (e.g. cone apex)
+        try:
+            faces = shape.ancestorsOfType(edge, Part.Face)
+        except Exception:
+            faces = []
+        if len({f.hashCode() for f in faces}) >= 2:
+            ids.append(i)
+    return ids
+
+
 def _edge_list(op, target, value_keys):
     """Return Part::Fillet/Chamfer edge tuples.
 
     ``value_keys`` is ('radius',) or ('size',); the value is used for both ends.
-    Honours an explicit 1-based 'edges' list, else applies to every edge.
+    Honours an explicit 1-based 'edges' list, else applies to every edge that
+    can actually be modified (see :func:`_modifiable_edge_ids`).
     """
     doc = target.Document
     doc.recompute()  # ensure target.Shape exists so we can count edges
@@ -241,7 +282,11 @@ def _edge_list(op, target, value_keys):
                     f"(has {n_edges} edges)."
                 )
     else:
-        ids = range(1, n_edges + 1)
+        ids = _modifiable_edge_ids(shape)
+        if not ids:
+            raise InterpreterError(
+                f"'{op['target']}' has no edges that can be filleted/chamfered."
+            )
     return [(int(i), float(value), float(value)) for i in ids]
 
 

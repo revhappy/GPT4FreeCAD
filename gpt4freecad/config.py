@@ -130,7 +130,11 @@ class Config:
 
     # --- providers / keys ------------------------------------------------- #
     def api_key(self, provider_id: str) -> str:
-        return self._b.get_str(f"key_{provider_id}", "").strip()
+        key = self._b.get_str(f"key_{provider_id}", "").strip()
+        if not key:
+            # Standard env-var names: ANTHROPIC_API_KEY, GEMINI_API_KEY, ...
+            key = os.environ.get(f"{provider_id.upper()}_API_KEY", "").strip()
+        return key
 
     def set_api_key(self, provider_id: str, key: str) -> None:
         self._b.set_str(f"key_{provider_id}", (key or "").strip())
