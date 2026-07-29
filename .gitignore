@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.gpt4freecad.json
+.gpt4freecad_templates/
+gemini-3-docs.md.txt
+*.FCStd1
+*.FCBak
+.DS_Store
+.vscode/
+.idea/

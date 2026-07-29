@@ -1,11 +1,128 @@
 # GPT4FreeCAD Changelog
 
+## [2.3.0] - 2026-07-29
+
+Start from a part, not a blank prompt.
+
+### Added
+- **Template library** (`cad/templates.py`) — a **Template** picker with six built-in
+  parametric starter programs: circular flange (bolt circle + centre bore), L-bracket,
+  open-top electronics enclosure (with corner screw bosses), gear blank, mounting plate,
+  and spacer/standoff. Selecting one pre-fills the editable plan preview (Structured) or
+  seeds the engineering timeline (Engineering) with clean named features — **no API
+  call**. In Structured mode the plan is also seeded into the conversation, so follow-ups
+  like *"make the holes M5"* refine the template.
+- **Save plan as template** — a Save button next to the picker stores the current plan
+  (preview or timeline) as a user template: a plain `{"operations": [...]}` JSON file in
+  the user templates folder (`GPT4FreeCAD/templates` under the FreeCAD user directory;
+  override with `GPT4FREECAD_TEMPLATES`). User templates appear in the picker immediately
+  and in every later session; unreadable files are reported, not fatal.
+- 6 new unit tests (63 total).
+
+### Changed
+- The **Shape hint** dropdown is replaced by the Template picker (as sketched in
+  IDEAS.md); the picker is available in both Structured and Engineering modes.
+
+## [2.2.0] - 2026-07-29
+
+The model now checks its own work. Ideas adapted from the open-source
+[CAD Skills](https://github.com/earthtojake/text-to-cad) agent framework.
+
+### Added
+- **Post-build geometry inspection** (`cad/inspect.py`) — after every build the result is
+  inspected: kernel validity, solid count, watertightness, volume, and bounding box, with a
+  one-line report in the Activity log. In Structured mode a defective build (e.g. a boolean
+  that missed its target, a zero-volume result, an open shell) is **undone automatically**
+  and the inspection report is sent back to the model for one corrected plan — extending the
+  existing schema-repair retry into a full geometry repair loop. Other modes log warnings.
+- **STEP export** — a new STEP button next to STL exports the exact B-rep geometry
+  (`Part.export`) for CAD/CAM interchange. Enabled after any successful build.
+- **Engineering defaults in the prompt** — standard values applied when the user doesn't
+  specify: M3/M4/M5 clearance holes (3.4/4.5/5.5 mm) and counterbores (6.5/8.0/10.0 mm),
+  2.0–3.0 mm walls, 1.0–3.0 mm cosmetic fillets, part seated flat on XY, closed
+  positive-volume solids. Included in both Structured and Engineering modes.
+- 12 new unit tests (57 total).
+
+## [2.1.0] - 2026-05-29
+
+Turns GPT4FreeCAD into a precision engineering tool, not just a generator.
+
+### Added
+- **Engineering mode (step-by-step feature timeline)** — build/edit a part as an ordered list
+  of operations. Add steps via AI (`+ AI step`, generated one increment at a time with full
+  context of the existing program) or by hand (`+ Manual`, a precise schema-driven parameter
+  form). Select a step to edit its exact parameters, reorder/insert/delete steps, and the whole
+  tree **rebuilds deterministically**. The model is given extra engineering discipline
+  (datums, manufacturable dimensions, one feature per step, finishing last).
+- **3D-print mode** — a toggle that composes with Structured and Engineering modes:
+  printability rules + build-volume constraint added to the prompt (default 254 mm = 10 in per
+  axis, editable in Settings), a post-build bounding-box check that offers one-click
+  **Scale to fit**, and **Export STL…** with configurable mesh deviation.
+- **Five new operations**: `linear_pattern`, `polar_pattern`, `mirror`, `shell` (hollow), and
+  `hole` (with optional counterbore / countersink).
+- New schema field kinds (`int`, `bool`, `enum`) and a `validate_op` helper powering instant
+  per-field validation in the engineering form.
+- `engine.generate_step`, `interpreter.rebuild`, and `cad/export.py` (STL export + a pure
+  `overage` helper). New UI modules `ui/engineering.py` and `ui/op_form.py`.
+
+### Changed
+- Gemini model list is now the **Gemini 3 family only** (`gemini-3.5-flash`,
+  `gemini-3-flash-preview`, `gemini-3.1-pro-preview`); 1.x/2.0/2.5 removed.
+- The "Mode" selector is now Structured / Engineering / Python.
+
+## [2.0.0] - 2026-05-29
+
+A ground-up rewrite turning GPT4FreeCAD from a single-provider proof-of-concept into a
+usable, structured CAD assistant.
+
+### Added
+- **Multi-provider LLM layer** — Google Gemini, OpenAI, and Anthropic Claude, behind a
+  pluggable provider registry. Each has its own API-key field and editable model list.
+- **Gemini 3 support** — defaults to the Gemini 3 family (`gemini-3.5-flash`,
+  `gemini-3-flash-preview`, `gemini-3.1-pro-preview`) plus 2.5 Flash/Pro. Per Google's
+  guidance, temperature is left at the default 1.0 for Gemini 3 and a generous output
+  budget is reserved for "thinking". A **Thinking level** selector (minimal/low/medium/high,
+  or default) exposes Gemini 3's reasoning depth; "minimal" is auto-bumped to "low" for Pro,
+  which does not support it.
+- **Structured outputs (the headline feature)** — the model emits a validated JSON
+  *intermediate representation* of CAD operations (`box`, `cylinder`, `sphere`, `cone`,
+  `torus`, `extrude`, `cut`, `fuse`, `common`, `fillet`, `chamfer`, `translate`, `rotate`).
+- **Deterministic interpreter** — builds the IR into native **parametric** FreeCAD objects
+  (an editable feature tree), inside a single undo transaction.
+- **Automatic repair retry** — invalid programs are sent back to the model with the precise
+  validation error for one self-correction attempt; build failures trigger a fix as well.
+- **Structured inputs** — provider/model/mode/units selectors and a shape hint, plus an
+  editable plan preview you can tweak before building.
+- **Workbench + dockable panel** — a proper FreeCAD workbench with a toolbar, menu, and a
+  side panel, replacing the old modal dialog.
+- **Settings dialog** — manage keys, per-provider models, temperature, max tokens,
+  auto-build, and an OpenAI-compatible endpoint override (Azure/OpenRouter/local). Includes
+  a "Test connection" button.
+- **Advanced Python mode** — opt-in code-generation path with a safety denylist.
+- **Background worker** — LLM calls run off the UI thread so FreeCAD stays responsive.
+- **PySide2/PySide6 compatibility shim** — works on FreeCAD 0.20/0.21 and 1.0+.
+- **Unit tests** — 28 tests covering schema validation, JSON extraction, all three
+  providers (network-mocked), the engine repair loop, and config persistence.
+
+### Changed
+- API keys now live in FreeCAD preferences (password-masked), not a plaintext
+  `~/api_key.txt`. The legacy file is migrated automatically on first run.
+- **Zero third-party dependencies** — replaced `requests` with the standard library.
+- Modernised `package.xml` to the FreeCAD package-metadata format with a workbench entry.
+
+### Removed
+- Legacy `gpt.py`, `gpt4_integration.py`, and the misnamed `_init_.py` (superseded by the
+  `gpt4freecad` package).
+
+### Security
+- Generated code is no longer `exec()`'d by default; the safe structured path is the
+  default. Python mode is opt-in and screened by a denylist.
+
 ## [1.0.0] - 2023-05-02
 
 ### Added
-
-- Initial release of GPT4FreeCAD
-- GPT-4 integration for generating Python scripts based on user input
-- Basic UI for user input and execution of generated code
-- Undo functionality
-- Conversation history
+- Initial release of GPT4FreeCAD.
+- GPT-4 integration for generating Python scripts based on user input.
+- Basic UI for user input and execution of generated code.
+- Undo functionality.
+- Conversation history.

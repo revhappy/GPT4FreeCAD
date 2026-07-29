@@ -1,7 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Package>
-    <Name>GPT4FreeCAD</Name>
-    <Icon>logo.svg</Icon>
-    <Repository>https://github.com/revhappy/GPT4FreeCAD.git</Repository>
-    <Readme>https://github.com/revhappy/GPT4FreeCAD/blob/master/README.md</Readme>
-</Package>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>GPT4FreeCAD</name>
+  <description>
+    Generate parametric FreeCAD geometry from natural-language descriptions.
+    Supports Google Gemini, OpenAI, and Anthropic Claude. Produces validated,
+    structured CAD operations (boxes, cylinders, booleans, fillets, extrudes,
+    and more) built as an editable feature tree, with an optional advanced
+    Python-scripting mode.
+  </description>
+  <version>2.3.0</version>
+  <date>2026-07-29</date>
+  <maintainer email="revhappys2k@gmail.com">Robb Sharma</maintainer>
+  <license file="LICENSE.MD">MIT</license>
+
+  <url type="repository" branch="main">https://github.com/revhappy/GPT4FreeCAD.git</url>
+  <url type="readme">https://github.com/revhappy/GPT4FreeCAD/blob/main/README.md</url>
+  <url type="bugtracker">https://github.com/revhappy/GPT4FreeCAD/issues</url>
+
+  <icon>gpticon.png</icon>
+
+  <content>
+    <workbench>
+      <classname>GPT4FreeCADWorkbench</classname>
+      <name>GPT4FreeCAD</name>
+      <icon>gpticon.png</icon>
+      <subdirectory>./</subdirectory>
+      <description>Generate CAD geometry from natural language using LLMs.</description>
+    </workbench>
+  </content>
+</package>

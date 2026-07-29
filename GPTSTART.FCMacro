@@ -1,2 +1,66 @@
-from FreeCAD.GPT4FreeCAD import gpt
-gpt.show_gpt_command_dialog()
+# GPT4FreeCAD launcher macro.
+# Opens the GPT4FreeCAD panel. Works whether or not the workbench is active.
+import os
+import sys
+import importlib
+
+import FreeCAD as App
+
+
+def _ensure_importable():
+    candidates = []
+    try:
+        candidates.append(os.path.dirname(os.path.abspath(__file__)))
+    except Exception:
+        pass
+    for getter in ("getUserAppDataDir", "getResourceDir"):
+        try:
+            base = getattr(App, getter)()
+            candidates.append(os.path.join(base, "Mod", "GPT4FreeCAD"))
+        except Exception:
+            pass
+    for path in candidates:
+        if os.path.isfile(os.path.join(path, "gpt4freecad", "ui", "panel.py")):
+            path = os.path.normcase(os.path.abspath(path))
+            sys.path[:] = [entry for entry in sys.path
+                           if os.path.normcase(os.path.abspath(entry or os.curdir)) != path]
+            sys.path.insert(0, path)
+            return path
+    raise ImportError("Could not locate the GPT4FreeCAD package beside this macro.")
+
+
+addon_root = _ensure_importable()
+
+# FreeCAD may already have imported another installed copy. Purge that module
+# tree so this macro always loads the files from addon_root.
+for module_name in list(sys.modules):
+    if module_name == "gpt4freecad" or module_name.startswith("gpt4freecad."):
+        del sys.modules[module_name]
+importlib.invalidate_caches()
+
+# A macro can be run repeatedly in the same FreeCAD session. Replace the old
+# dock and reload the UI modules so layout fixes take effect without requiring
+# a full application restart.
+import FreeCADGui as Gui
+
+try:
+    from PySide2 import QtWidgets
+except ImportError:
+    from PySide6 import QtWidgets
+
+main_window = Gui.getMainWindow()
+existing = main_window.findChild(QtWidgets.QDockWidget, "GPT4FreeCADDock")
+if existing is not None:
+    existing.close()
+    existing.setParent(None)
+    existing.deleteLater()
+    QtWidgets.QApplication.processEvents()
+
+import gpt4freecad.ui.op_form as op_form_module
+import gpt4freecad.ui.engineering as engineering_module
+import gpt4freecad.ui.panel as panel_module
+
+importlib.reload(op_form_module)
+importlib.reload(engineering_module)
+panel_module = importlib.reload(panel_module)
+panel_module.show_panel()
