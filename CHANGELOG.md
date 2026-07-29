@@ -1,5 +1,37 @@
 # GPT4FreeCAD Changelog
 
+## [2.3.1] - 2026-07-29
+
+Fixes found by dogfooding the engineering timeline with Claude as the model.
+
+### Fixed
+- **Anthropic provider works again on current Claude models.** The adapter
+  forced JSON output by prefilling an assistant turn with `{` and always sent
+  `temperature` - both are rejected with HTTP 400 by Claude 4.6+/5 models
+  (including the former default `claude-sonnet-4-6`), so every request with a
+  modern Claude model failed. JSON is now enforced by the prompt alone (the
+  tolerant extractor and auto-repair round already handle the rest), and
+  sampling parameters are only sent to models that accept them.
+- **Fillet/chamfer "all edges" no longer fails on round parts.** Cylindrical
+  and conical faces carry a seam edge that OpenCascade cannot fillet or
+  chamfer; including it made `Part::Chamfer`/`Part::Fillet` silently compute a
+  null shape (e.g. chamfering a plain washer). Seam and degenerate edges are
+  now excluded when no explicit edge list is given.
+- **Null geometry now fails the build instead of committing silently.** A
+  parametric feature that fails to compute on recompute (e.g. an oversized
+  chamfer) previously left a "no geometry" step in the engineering timeline;
+  the rebuild now raises a clear error and the transaction rolls back.
+
+### Added
+- Anthropic: Claude 5 model list (`claude-opus-5` default, `claude-fable-5`),
+  a clear error when safety classifiers decline a request, an automatic
+  server-side fallback for declined requests on Claude 5-tier models, and a
+  5-minute request timeout floor for thinking models.
+- API keys fall back to standard environment variables (`ANTHROPIC_API_KEY`,
+  `GEMINI_API_KEY`, `OPENAI_API_KEY`) when not set in Settings.
+- 3 new unit tests covering the Claude 5 request shape and refusal handling
+  (65 total, replacing the obsolete prefill test).
+
 ## [2.3.0] - 2026-07-29
 
 Start from a part, not a blank prompt.

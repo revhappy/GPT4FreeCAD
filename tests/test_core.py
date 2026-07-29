@@ -280,20 +280,40 @@ def test_gemini_blocked():
     expect_error(lambda: get_provider("gemini").chat(req, "g-key"), LLMError)
 
 
-def test_anthropic_request_prefill():
-    captured = _patch(anthropic_mod, {"content": [{"type": "text", "text": '"a": 1}'}]})
+def test_anthropic_request():
+    captured = _patch(anthropic_mod, {"content": [{"type": "text", "text": '{"a": 1}'}]})
     req = ChatRequest(
         messages=[{"role": "system", "content": "sys"},
                   {"role": "user", "content": "hi"}],
         model="claude-sonnet-4-6", json_mode=True, max_tokens=200,
     )
     out = get_provider("anthropic").chat(req, "ant-key")
-    assert out == '{"a": 1}'  # prefill "{" re-prepended
+    assert out == '{"a": 1}'
     assert captured["headers"]["x-api-key"] == "ant-key"
     assert captured["headers"]["anthropic-version"]
     assert captured["payload"]["system"] == "sys"
-    assert captured["payload"]["messages"][-1] == {"role": "assistant", "content": "{"}
+    # No assistant prefill: current Claude models reject it with HTTP 400.
+    assert captured["payload"]["messages"][-1] == {"role": "user", "content": "hi"}
     assert captured["payload"]["max_tokens"] == 200
+    assert "temperature" in captured["payload"]  # still accepted on sonnet-4-6
+
+
+def test_anthropic_claude5_request():
+    captured = _patch(anthropic_mod, {"content": [{"type": "text", "text": "ok"}]})
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}],
+                      model="claude-fable-5", max_tokens=100)
+    out = get_provider("anthropic").chat(req, "ant-key")
+    assert out == "ok"
+    assert "temperature" not in captured["payload"]  # rejected on Claude 5
+    assert captured["payload"]["fallbacks"] == "default"
+    assert captured["headers"]["anthropic-beta"]
+
+
+def test_anthropic_refusal():
+    _patch(anthropic_mod, {"content": [], "stop_reason": "refusal"})
+    req = ChatRequest(messages=[{"role": "user", "content": "x"}],
+                      model="claude-fable-5")
+    expect_error(lambda: get_provider("anthropic").chat(req, "k"), LLMError)
 
 
 # --------------------------------------------------------------------------- #
