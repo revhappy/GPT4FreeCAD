@@ -12,7 +12,6 @@ from .settings import open_settings
 from .engineering import EngineeringWidget
 from ..config import get_config
 from ..llm import all_providers, get_provider
-from ..llm.base import LLMError
 from .. import engine, harness
 from ..cad import prompts, schema, templates
 
