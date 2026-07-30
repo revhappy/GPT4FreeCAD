@@ -496,11 +496,45 @@ def test_validate_op_against_defined_names():
         schema.SchemaError)
 
 
+def _schema_branches():
+    """{op name: its schema branch} from the generated program schema."""
+    items = schema.json_schema()["properties"]["operations"]["items"]
+    return {b["properties"]["op"]["const"]: b for b in items["anyOf"]}
+
+
 def test_new_ops_in_reference_and_schema():
     ref = schema.operations_reference()
+    branches = _schema_branches()
     for op in ("linear_pattern", "polar_pattern", "mirror", "shell", "hole"):
         assert op in ref
-        assert op in schema.json_schema()["properties"]["operations"]["items"]["properties"]["op"]["enum"]
+        assert op in branches
+
+
+def test_json_schema_carries_each_ops_required_fields():
+    """The schema must constrain more than 'op'.
+
+    A grammar built from a schema that only pinned 'op' happily produced
+    {"op": "box"} with no name or dimensions - accepted by the sampler, then
+    rejected by validate_program. Every op's required fields belong in the
+    schema, and it must stay derived from OPERATIONS.
+    """
+    branches = _schema_branches()
+    assert set(branches) == set(schema.OPERATIONS)
+    for op, spec in schema.OPERATIONS.items():
+        required = branches[op]["required"]
+        assert required[0] == "op"
+        for field in spec["required"]:
+            assert field in required, f"{op} must require {field}"
+            assert field in branches[op]["properties"]
+        for field in spec["optional"]:
+            assert field in branches[op]["properties"], f"{op} should allow {field}"
+
+    # Field types survive the translation, including enums and vectors.
+    assert branches["box"]["properties"]["length"] == {"type": "number"}
+    assert branches["mirror"]["properties"]["plane"]["enum"] == ["XY", "XZ", "YZ"]
+    assert branches["linear_pattern"]["properties"]["count"] == {"type": "integer"}
+    assert branches["box"]["properties"]["placement"]["type"] == "object"
+    assert branches["translate"]["properties"]["vector"]["maxItems"] == 3
 
 
 def test_prompt_addenda_and_units():
@@ -816,7 +850,11 @@ def test_local_json_mode_sends_grammar_schema():
         # The CAD program schema is what gets compiled to a GBNF grammar.
         sent = fmt["json_schema"]["schema"]
         assert sent["required"] == ["operations"]
-        assert "box" in sent["properties"]["operations"]["items"]["properties"]["op"]["enum"]
+        branches = {b["properties"]["op"]["const"]: b
+                    for b in sent["properties"]["operations"]["items"]["anyOf"]}
+        assert "box" in branches
+        # The grammar must pin the dimensions too, not just the op name.
+        assert "length" in branches["box"]["required"]
     finally:
         _restore_local(originals)
 

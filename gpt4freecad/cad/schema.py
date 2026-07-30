@@ -357,8 +357,70 @@ def operations_reference() -> str:
     return "\n".join(lines)
 
 
+_VEC3_SCHEMA = {"type": "array", "items": {"type": "number"},
+                "minItems": 3, "maxItems": 3}
+_PLACEMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pos": _VEC3_SCHEMA,
+        "rotation": {
+            "type": "object",
+            "required": ["axis", "angle"],
+            "properties": {"axis": _VEC3_SCHEMA, "angle": {"type": "number"}},
+        },
+    },
+}
+
+
+def _field_schema(kind: str, allowed=None) -> Dict[str, Any]:
+    """JSON Schema for one IR field type token."""
+    if kind == ENUM:
+        return {"enum": list(allowed or [])}
+    return {
+        NUMBER: {"type": "number"},
+        INT: {"type": "integer"},
+        BOOL: {"type": "boolean"},
+        STRING: {"type": "string", "minLength": 1},
+        VEC3: _VEC3_SCHEMA,
+        INTLIST: {"type": "array", "items": {"type": "integer"}},
+        STRLIST: {"type": "array", "items": {"type": "string"}, "minItems": 2},
+        PROFILE: {
+            "type": "array",
+            "minItems": 3,
+            "items": {"type": "array", "items": {"type": "number"},
+                      "minItems": 2, "maxItems": 2},
+        },
+        PLACEMENT: _PLACEMENT_SCHEMA,
+    }.get(kind, {})
+
+
+def _op_schema(op: str, spec: Dict[str, Any]) -> Dict[str, Any]:
+    enums = spec.get("enums", {})
+    properties: Dict[str, Any] = {"op": {"const": op}}
+    for field, kind in spec["required"].items():
+        properties[field] = _field_schema(kind, enums.get(field))
+    for field, kind in spec["optional"].items():
+        properties[field] = _field_schema(kind, enums.get(field))
+    return {
+        "type": "object",
+        "required": ["op", *spec["required"].keys()],
+        "properties": properties,
+        # Left permissive to match validate_program, which ignores unknown keys.
+        "additionalProperties": True,
+    }
+
+
 def json_schema() -> Dict[str, Any]:
-    """A JSON schema describing a valid program (for docs / strict providers)."""
+    """A JSON schema describing a valid program.
+
+    One branch per operation, carrying that op's *required* fields - so a
+    provider that enforces the schema (a local model, where it is compiled to a
+    GBNF grammar) cannot emit an op with its dimensions missing. An earlier
+    version only constrained ``op`` itself, which let a grammar-constrained model
+    return ``{"op": "box"}`` with no name or size: accepted by the grammar, then
+    rejected by :func:`validate_program`. Derived from :data:`OPERATIONS` so the
+    schema, the validator and the prompt reference cannot drift apart.
+    """
     return {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "GPT4FreeCAD program",
@@ -368,12 +430,8 @@ def json_schema() -> Dict[str, Any]:
             "operations": {
                 "type": "array",
                 "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "required": ["op"],
-                    "properties": {"op": {"enum": list(OPERATIONS)}},
-                    "additionalProperties": True,
-                },
+                "items": {"anyOf": [_op_schema(op, spec)
+                                    for op, spec in OPERATIONS.items()]},
             }
         },
     }
