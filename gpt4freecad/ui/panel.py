@@ -670,6 +670,7 @@ class GPTPanel(QtWidgets.QWidget):
             provider.endpoint = self.cfg.openai_endpoint()
         if provider.id == "machine":
             provider.base_url = self.cfg.machine_base_url()
+            provider.model_path = self.cfg.machine_model_path()
         return {
             "provider": provider,
             "api_key": self.cfg.api_key(provider.id),
