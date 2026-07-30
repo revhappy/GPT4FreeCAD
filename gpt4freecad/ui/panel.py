@@ -12,7 +12,7 @@ from .engineering import EngineeringWidget
 from ..config import get_config
 from ..llm import all_providers, get_provider
 from ..llm.base import LLMError
-from .. import engine
+from .. import engine, harness
 from ..cad import prompts, schema, templates
 
 _SHAPE_HINTS = ["(auto)", "box", "cylinder", "sphere", "cone", "torus",
@@ -37,7 +37,7 @@ class GPTPanel(QtWidgets.QWidget):
         self._last_built = None      # last result object (for Export STL / scale)
         self._worker = None
         self._pending_user = ""
-        self._repair_attempts = 0
+        self._repair = harness.RepairSession(self.cfg.repair_rounds())
         self._loading = True
         self._build_ui()
         self._load_state()
@@ -697,7 +697,7 @@ class GPTPanel(QtWidgets.QWidget):
         if not description:
             self._set_status("Type a description first.", error=True)
             return
-        self._repair_attempts = 0
+        self._repair.reset(self.cfg.repair_rounds())
         self._start_generation(description, log_as_user=True)
 
     def _start_generation(self, user_message, log_as_user=True):
@@ -735,6 +735,17 @@ class GPTPanel(QtWidgets.QWidget):
         self.build_btn.setEnabled(True)
         self.output_tabs.setCurrentIndex(1)
         self.input.clear()
+
+        # Loop guard: during a repair round, a plan identical to one that
+        # already failed will just fail again - stop instead of burning tokens.
+        payload = result.program if result.program is not None else (result.code or "")
+        if self._repair.attempts and self._repair.seen_failure(payload):
+            self._log_error(
+                "The model returned the same failing plan again - stopping "
+                "auto-repair. Edit the plan or refine your prompt.")
+            self._set_status("Auto-repair stalled.", error=True)
+            return
+
         if self.cfg.auto_run():
             self._build_from_preview()
         else:
@@ -748,7 +759,7 @@ class GPTPanel(QtWidgets.QWidget):
     # Building geometry (main thread)
     # ------------------------------------------------------------------ #
     def _on_build_clicked(self):
-        self._repair_attempts = 0
+        self._repair.reset(self.cfg.repair_rounds())
         self._build_from_preview()
 
     def _build_from_preview(self):
@@ -770,17 +781,23 @@ class GPTPanel(QtWidgets.QWidget):
             self._set_status("Plan is not valid JSON.", error=True)
             self._log_error(f"Plan JSON error: {exc}")
             return
+        # Fingerprint the ops list itself so it matches result.program in the
+        # loop guard (the preview text wraps it in {"operations": ...}).
+        ops = data.get("operations", data) if isinstance(data, dict) else data
         try:
             ops = schema.validate_program(data)
             result_obj, log_lines = interpreter.build_program(
                 ops, group_separate=(self._current_part_layout() == "separate"))
         except (schema.SchemaError, interpreter.InterpreterError) as exc:
-            self._handle_build_error(str(exc))
+            self._handle_build_error(str(exc), failed_payload=ops)
             return
+        for line in log_lines:
+            if line.startswith("note:"):  # deterministic in-build corrections
+                self._log_system(line)
         name = getattr(result_obj, "Label", None) or getattr(result_obj, "Name", "result")
         self._log_system(f"Built {len(log_lines)} step(s). Result object: '{name}'.")
         problems = self._inspect_built(result_obj)
-        if problems and self._try_geometry_repair(problems):
+        if problems and self._try_geometry_repair(problems, ops):
             return  # defective build undone; a corrected plan is on its way
         if problems:
             self._log_error("Geometry warnings: " + "; ".join(problems))
@@ -794,7 +811,7 @@ class GPTPanel(QtWidgets.QWidget):
         try:
             log_lines, _code = pyrun.run_python_code(text, prechecked=True)
         except pyrun.PythonRunError as exc:
-            self._handle_build_error(str(exc))
+            self._handle_build_error(str(exc), failed_payload=text)
             return
         for line in log_lines:
             self._log_system(line)
@@ -808,15 +825,21 @@ class GPTPanel(QtWidgets.QWidget):
         self._set_status("Done.")
         self._post_build(result)
 
-    def _handle_build_error(self, message):
+    def _handle_build_error(self, message, failed_payload=None):
         self._log_error(f"Build failed: {message}")
-        if self._current_mode() == "structured" and self._repair_attempts < 1:
-            self._repair_attempts += 1
-            self._set_status("Build failed - asking the model to fix it…")
-            self._log_system("Sending the error back to the model for a fix…")
-            self._start_generation(prompts.repair_prompt(message), log_as_user=False)
-        else:
+        mode = self._current_mode()
+        if mode not in ("structured", "python") or not self._repair.can_retry():
             self._set_status("Build failed. Edit the plan or refine your prompt.", error=True)
+            return
+        if failed_payload is not None:
+            self._repair.note_failure(failed_payload)
+        self._repair.start_attempt()
+        rounds = self._repair.round_label
+        self._set_status(f"Build failed - asking the model to fix it (round {rounds})…")
+        self._log_system(f"Sending the error back to the model for a fix (round {rounds})…")
+        prompt = (prompts.python_repair_prompt(message) if mode == "python"
+                  else prompts.repair_prompt(message))
+        self._start_generation(prompt, log_as_user=False)
 
     # ------------------------------------------------------------------ #
     # Post-build: bed-fit check + export enablement (shared)
@@ -847,15 +870,16 @@ class GPTPanel(QtWidgets.QWidget):
         self._log_system(ginspect.summary(facts))
         return ginspect.problems(facts, expect_single=expect_single)
 
-    def _try_geometry_repair(self, problems):
+    def _try_geometry_repair(self, problems, program):
         """Undo a defective structured build and ask the model for a fix.
 
-        Returns True if a repair round-trip was started (shares the one-repair
+        Returns True if a repair round-trip was started (shares the repair
         budget with schema/build repairs).
         """
-        if self._current_mode() != "structured" or self._repair_attempts >= 1:
+        if self._current_mode() != "structured" or not self._repair.can_retry():
             return False
-        self._repair_attempts += 1
+        self._repair.note_failure(program)
+        self._repair.start_attempt()
         report = "; ".join(problems)
         self._log_error(f"Geometry check failed: {report}")
         try:
@@ -865,7 +889,8 @@ class GPTPanel(QtWidgets.QWidget):
                 self._log_system("Undid the defective build.")
         except Exception:
             pass
-        self._set_status("Defective geometry - asking the model to fix it…")
+        self._set_status(
+            f"Defective geometry - asking the model to fix it (round {self._repair.round_label})…")
         self._start_generation(prompts.geometry_repair_prompt(report), log_as_user=False)
         return True
 

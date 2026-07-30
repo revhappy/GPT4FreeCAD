@@ -155,6 +155,30 @@ def repair_prompt(error_message: str) -> str:
     )
 
 
+def python_repair_prompt(error_message: str) -> str:
+    """Follow-up user message asking the model to fix a failed Python script."""
+    return (
+        "The previous Python script failed when executed inside FreeCAD. "
+        "Error:\n\n"
+        f"{error_message}\n\n"
+        "Return a corrected, complete script in a single ```python``` fenced "
+        "block and nothing else. Fix the reported line, but re-check the whole "
+        "script for the same mistake."
+    )
+
+
+def step_repair_prompt(description: str, failed_ops, error_message: str) -> str:
+    """Engineering-timeline follow-up: the appended step failed to build."""
+    return (
+        f"{description}\n\n"
+        "Your previous operation(s) for this step failed to build:\n"
+        f"{json.dumps({'operations': list(failed_ops or [])}, indent=2)}\n\n"
+        f"Build error: {error_message}\n\n"
+        'Return corrected operation(s) to APPEND instead, as {"operations": '
+        "[ ... ]} and nothing else."
+    )
+
+
 def geometry_repair_prompt(report: str) -> str:
     """Follow-up user message asking the model to fix defective built geometry."""
     return (

@@ -242,6 +242,13 @@ class Config:
     def set_auto_run(self, value: bool) -> None:
         self._b.set_bool("auto_run", value)
 
+    def repair_rounds(self) -> int:
+        """Max automatic fix-it round-trips per user action (0 disables)."""
+        return max(0, min(self._b.get_int("repair_rounds", 3), 10))
+
+    def set_repair_rounds(self, value: int) -> None:
+        self._b.set_int("repair_rounds", max(0, min(int(value), 10)))
+
     # --- legacy migration ------------------------------------------------- #
     def _migrate_legacy_key(self) -> None:
         if self._b.get_bool("migrated_legacy", False):

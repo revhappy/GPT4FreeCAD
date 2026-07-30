@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import ssl
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -66,6 +67,12 @@ class ChatRequest:
 # --------------------------------------------------------------------------- #
 # HTTP helper
 # --------------------------------------------------------------------------- #
+# Transient failures (rate limits, server hiccups, network blips) are retried
+# with these delays before giving up; auth and other client errors never are.
+_RETRY_DELAYS = (1.0, 3.0)
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504, 529}
+
+
 def http_post_json(
     url: str,
     payload: dict,
@@ -74,16 +81,28 @@ def http_post_json(
 ) -> dict:
     """POST ``payload`` as JSON and return the parsed JSON response.
 
-    Raises :class:`AuthError` (401/403), :class:`RateLimitError` (429) or
-    :class:`LLMError` for other failures, always including the server's body so
-    the user sees a useful message in the panel.
+    Transient failures (429 / 5xx / network errors) are retried with a short
+    backoff. Raises :class:`AuthError` (401/403), :class:`RateLimitError` (429)
+    or :class:`LLMError` for other failures, always including the server's body
+    so the user sees a useful message in the panel.
     """
     body = json.dumps(payload).encode("utf-8")
     final_headers = {"Content-Type": "application/json"}
     if headers:
         final_headers.update(headers)
 
-    request = urllib.request.Request(url, data=body, headers=final_headers, method="POST")
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            return _post_once(url, body, final_headers, timeout)
+        except LLMError as exc:
+            transient = isinstance(exc, RateLimitError) or getattr(exc, "transient", False)
+            if not transient or attempt >= len(_RETRY_DELAYS):
+                raise
+            time.sleep(_RETRY_DELAYS[attempt])
+
+
+def _post_once(url: str, body: bytes, headers: Dict[str, str], timeout: int) -> dict:
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     # Some corporate Python builds ship without a usable cert bundle; fall back
     # to a default context (still verifies, just lets the OS pick the store).
     context = ssl.create_default_context()
@@ -104,12 +123,16 @@ def http_post_json(
             raise RateLimitError(
                 f"{msg}\n\nRate limit or quota exceeded - wait a moment or check billing."
             ) from exc
-        raise LLMError(msg) from exc
+        error = LLMError(msg)
+        error.transient = status in _RETRYABLE_STATUS
+        raise error from exc
     except urllib.error.URLError as exc:
-        raise LLMError(
+        error = LLMError(
             f"Network error: {exc.reason}\n\n"
             "Check your internet connection / proxy and that the endpoint URL is reachable."
-        ) from exc
+        )
+        error.transient = True
+        raise error from exc
     except json.JSONDecodeError as exc:
         raise LLMError(f"Could not parse provider response as JSON: {exc}") from exc
 

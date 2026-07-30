@@ -127,6 +127,15 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         form.addRow("", self._auto_run)
 
+        self._repair_rounds = QtWidgets.QSpinBox()
+        self._repair_rounds.setRange(0, 10)
+        self._repair_rounds.setValue(self.cfg.repair_rounds())
+        self._repair_rounds.setToolTip(
+            "How many times a failed generation or build is automatically sent "
+            "back to the model for a fix before giving up. 0 disables auto-repair."
+        )
+        form.addRow("Auto-repair rounds:", self._repair_rounds)
+
         return box
 
     def _printing_group(self):
@@ -206,6 +215,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cfg.set_temperature(self._temp.value())
         self.cfg.set_max_tokens(self._max_tokens.value())
         self.cfg.set_auto_run(self._auto_run.isChecked())
+        self.cfg.set_repair_rounds(self._repair_rounds.value())
         self.cfg.set_bed(self._bed_x.value(), self._bed_y.value(), self._bed_z.value())
         self.cfg.set_stl_deflection(self._deflection.value())
         self.accept()

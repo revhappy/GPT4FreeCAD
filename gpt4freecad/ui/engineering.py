@@ -14,7 +14,7 @@ from functools import partial
 from .qt import QtWidgets, exec_dialog
 from . import op_form
 from .op_form import OpForm
-from ..cad import schema
+from ..cad import prompts, schema
 from .. import engine
 
 
@@ -26,6 +26,8 @@ class EngineeringWidget(QtWidgets.QWidget):
         self.objects = {}        # IR name -> FreeCAD object (last build)
         self.created_names = []  # FreeCAD Names from last build (for removal)
         self._form = None
+        self._pending_desc = ""  # last AI-step request, for repair prompts
+        self._last_error = None  # why the last _apply_program/_rebuild failed
         self._build_ui()
 
     # ------------------------------------------------------------------ #
@@ -134,6 +136,8 @@ class EngineeringWidget(QtWidgets.QWidget):
             self.host._log_error(f"No API key for {ctx['provider'].label}. Open Settings (⚙).")
             return
         self.host._log_user(desc)
+        self.host._repair.reset(self.host.cfg.repair_rounds())
+        self._pending_desc = desc
         fn = partial(
             engine.generate_step, ctx["provider"], ctx["api_key"], ctx["model"],
             list(self.program), desc,
@@ -149,11 +153,49 @@ class EngineeringWidget(QtWidgets.QWidget):
         if not new_ops:
             self.host._log_error("Model returned no new operations.")
             return
-        combined = list(self.program) + new_ops
+        prior = list(self.program)
+        combined = prior + new_ops
         if self._apply_program(combined, select=len(combined) - 1):
             note = " (auto-repaired)" if getattr(result, "repaired", False) else ""
             self.host._log_system(f"Added {len(new_ops)} step(s){note}.")
             self.host.input.clear()
+            return
+        error = self._last_error or "unknown build error"
+        if self.program is combined:
+            # Rebuild failed after the list was committed. The document itself
+            # was already restored by the aborted transaction; roll back the list.
+            self.program = prior
+            self._refresh(len(prior) - 1 if prior else None)
+            self.host._log_system("Rolled back the failed step(s).")
+        self._maybe_repair_step(new_ops, error)
+
+    def _maybe_repair_step(self, failed_ops, error):
+        """Send a failed AI step back to the model, within the repair budget."""
+        repair = self.host._repair
+        if repair.seen_failure(failed_ops):
+            self.host._log_error(
+                "The model returned the same failing step again - stopping "
+                "auto-repair. Edit the step or rephrase.")
+            self.host._set_status("Auto-repair stalled.", error=True)
+            return
+        if not repair.can_retry():
+            self.host._set_status("Step failed. Edit the step or rephrase.", error=True)
+            return
+        repair.note_failure(failed_ops)
+        repair.start_attempt()
+        ctx = self.host._gen_context()
+        desc = prompts.step_repair_prompt(self._pending_desc, failed_ops, error)
+        fn = partial(
+            engine.generate_step, ctx["provider"], ctx["api_key"], ctx["model"],
+            list(self.program), desc,
+            units=ctx["units"], engineering=True, print_profile=ctx["print_profile"],
+            temperature=ctx["temperature"], max_tokens=ctx["max_tokens"],
+            thinking_level=ctx["thinking_level"], part_layout=ctx["part_layout"],
+        )
+        self.host._set_status(
+            f"Step failed - asking the model for a fix (round {repair.round_label})…")
+        self.host._log_system("Sending the step error back to the model for a fix…")
+        self.host.run_worker(fn, self._on_step_generated)
 
     # ------------------------------------------------------------------ #
     # Manual step
@@ -238,17 +280,22 @@ class EngineeringWidget(QtWidgets.QWidget):
         return self._apply_program(ops, select=len(ops) - 1 if ops else None)
 
     def _apply_program(self, new_program, select=None):
-        """Validate the candidate program; on success commit + rebuild."""
+        """Validate the candidate program; on success commit + rebuild.
+
+        Returns True only if the program validated AND rebuilt; on failure
+        ``self._last_error`` says why.
+        """
+        self._last_error = None
         if new_program:
             try:
                 schema.validate_program({"operations": new_program})
             except schema.SchemaError as exc:
+                self._last_error = str(exc)
                 self.host._log_error(f"Change rejected: {exc}")
                 return False
         self.program = new_program
         self._refresh(select)
-        self._rebuild()
-        return True
+        return self._rebuild()
 
     def _refresh(self, select=None):
         self.steps.blockSignals(True)
@@ -263,26 +310,32 @@ class EngineeringWidget(QtWidgets.QWidget):
 
     def _rebuild(self):
         from ..cad import interpreter  # lazy: needs FreeCAD
+        self._last_error = None
         if not self.program:
             self._remove_created()
             self.objects, self.created_names = {}, []
             self.host._post_build(None)
             self.host._set_status("Timeline empty.")
-            return
+            return True
         try:
-            result, objects, _log = interpreter.rebuild(
+            result, objects, log = interpreter.rebuild(
                 self.program, prior_names=self.created_names,
                 group_separate=(self.host._current_part_layout() == "separate"))
         except Exception as exc:  # noqa: BLE001
+            self._last_error = str(exc)
             self.host._log_error(f"Rebuild failed: {exc}")
             self.host._set_status("Rebuild failed - edit the step.", error=True)
-            return
+            return False
+        for line in log:
+            if line.startswith("note:"):  # deterministic in-build corrections
+                self.host._log_system(line)
         self.objects = objects
         self.created_names = [o.Name for o in objects.values()]
         assembly_note = " as separate assembly components" if "__assembly__" in objects else ""
         self.host._log_system(f"Rebuilt {len(self.program)} step(s){assembly_note}.")
         self.host._post_build(result)
         self.host._set_status("Built.")
+        return True
 
     def _remove_created(self):
         try:
