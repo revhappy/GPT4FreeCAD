@@ -468,7 +468,9 @@ class GPTPanel(QtWidgets.QWidget):
         if not self._any_key_set():
             self._log_system(
                 "Welcome to GPT4FreeCAD. Open Settings (⚙) to add an API key for Gemini, "
-                "OpenAI, or Claude, then describe a part below.")
+                "OpenAI, or Claude - or pick the 'Local (Machine Activation)' provider to "
+                "run a model on this machine with no key and no cloud. Then describe a "
+                "part below.")
 
     def _populate_models(self):
         provider = self._current_provider()
@@ -666,6 +668,8 @@ class GPTPanel(QtWidgets.QWidget):
         provider = self._current_provider()
         if provider.id == "openai":
             provider.endpoint = self.cfg.openai_endpoint()
+        if provider.id == "machine":
+            provider.base_url = self.cfg.machine_base_url()
         return {
             "provider": provider,
             "api_key": self.cfg.api_key(provider.id),
@@ -702,7 +706,7 @@ class GPTPanel(QtWidgets.QWidget):
 
     def _start_generation(self, user_message, log_as_user=True):
         ctx = self._gen_context()
-        if not ctx["api_key"]:
+        if ctx["provider"].requires_key and not ctx["api_key"]:
             self._set_status(f"No API key for {ctx['provider'].label}.", error=True)
             self._log_error(f"No API key set for {ctx['provider'].label}. Open Settings (⚙).")
             return

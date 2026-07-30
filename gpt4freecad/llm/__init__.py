@@ -28,6 +28,7 @@ from .base import (
 from . import openai as _openai  # noqa: F401
 from . import anthropic as _anthropic  # noqa: F401
 from . import gemini as _gemini  # noqa: F401
+from . import local as _local  # noqa: F401
 
 __all__ = [
     "ChatRequest",

@@ -1,7 +1,7 @@
 # GPT4FreeCAD
 
 Generate **parametric** FreeCAD geometry from plain English — powered by your choice of
-**Google Gemini, OpenAI, or Anthropic Claude**.
+**Google Gemini, OpenAI, Anthropic Claude, or a local model on your own machine**.
 
 ![Workbench Logo](logo.svg)
 
@@ -38,6 +38,23 @@ Generate **parametric** FreeCAD geometry from plain English — powered by your 
 >   features — no API call — then tweak parameters or ask the AI to modify it.
 > - **Save plan as template** — store any plan or timeline as a reusable user template
 >   (a plain JSON file); it shows up in the picker across sessions.
+>
+> **New in 2.4 — run it entirely on your own machine, and let it fix itself:**
+> - **🔒 Local models, no API key, no cloud.** A fourth provider runs a GGUF model on your
+>   own hardware through the [Machine Activation SDK](https://github.com/revhappy/MachineActivationSDK)
+>   — offline, free per-part, and nothing you design ever leaves the computer. Structured mode
+>   gets a guarantee no cloud provider offers: the CAD schema is compiled to a **GBNF grammar
+>   and enforced inside llama.cpp's sampler**, so a small local model *cannot* emit a malformed
+>   program. [Set it up ↓](#local-models-no-api-key-no-cloud)
+> - **Auto-repair harness** — failed generations, failed builds and defective geometry are
+>   diagnosed and retried automatically for a configurable number of rounds (default 3, was a
+>   single attempt), with a loop guard that stops if the model repeats a plan that already
+>   failed. Python mode and the engineering timeline are now covered too.
+> - **Errors the model can actually act on** — a build failure names the operation that failed
+>   and what had already been built, instead of a bare kernel message.
+> - **Deterministic fixes, no round-trip** — an oversized fillet/chamfer shrinks until the
+>   geometry kernel accepts it and out-of-range edge indices are dropped, in milliseconds,
+>   before any request is spent.
 
 ---
 
@@ -45,12 +62,12 @@ Generate **parametric** FreeCAD geometry from plain English — powered by your 
 
 | | v1 (2023) | v2 (this) |
 |---|---|---|
-| Providers | OpenAI only | **Gemini, OpenAI, Claude** (pluggable) |
+| Providers | OpenAI only | **Gemini, OpenAI, Claude, or a local model** (pluggable) |
 | Model choice | hard-coded `gpt-4` | per-provider, editable dropdowns |
 | Output | raw `exec()` of model text | **validated structured IR** → parametric objects, *or* opt-in Python mode |
 | Keys | plaintext `~/api_key.txt` | FreeCAD preferences, per provider, password-masked |
 | UI | modal dialog | **workbench + dockable panel** with settings |
-| Reliability | hope | schema validation + **automatic repair retry** |
+| Reliability | hope | schema validation + **multi-round auto-repair harness** (+ grammar-enforced output on local models) |
 | Dependencies | `requests` | **none** (stdlib only) |
 | Threading | blocks FreeCAD | background worker, UI stays responsive |
 
@@ -107,13 +124,41 @@ unit you pick in the panel (mm/cm/m/in) and the model converts as needed.
 ## Requirements
 
 - FreeCAD **0.20+** (works on 0.20/0.21 with PySide2 and 1.0+ with PySide6)
-- An API key for at least one provider:
+- Either an API key for one cloud provider:
   - [Google AI Studio](https://aistudio.google.com/app/apikey) (Gemini)
   - [OpenAI](https://platform.openai.com/api-keys)
   - [Anthropic](https://console.anthropic.com/settings/keys)
+- …**or no key at all**, using a local model — see below.
 
 No `pip install` is required — GPT4FreeCAD uses only the Python standard library plus the
 PySide that ships with FreeCAD.
+
+## Local models (no API key, no cloud)
+
+Pick the **Local (Machine Activation)** provider to run a model on your own machine. No key,
+no account, works offline, and nothing you design leaves the computer.
+
+It talks to a [Machine Activation SDK](https://github.com/revhappy/MachineActivationSDK)
+server — `llama.cpp` under the hood, so any GGUF model works:
+
+```bash
+npm i machineai-activation          # provides the `machine` CLI
+machine serve ./models/your-model.gguf
+```
+
+Then in FreeCAD: **⚙ Settings → Local (Machine Activation)**, confirm the server URL
+(default `http://127.0.0.1:8177`), and press **Test connection**. Rather than a generic
+"OK" it reports the *activation contract* — whether the model actually fits this machine,
+which acceleration it got (CPU/GPU/NPU), and anything degraded. That is the difference
+between "the AI is slow" and "you are running a 7B model on CPU".
+
+**Structured mode gets a hard guarantee locally.** The CAD program schema is compiled to a
+GBNF grammar and enforced inside llama.cpp's sampler, so a small local model *cannot* emit a
+malformed program. Asking a 4B model nicely for JSON fails constantly; this cannot fail.
+
+Optionally `pip install machine-activation` (dependency-free, stdlib only) for the full
+activation report. Without it GPT4FreeCAD speaks the same HTTP directly, so the provider
+still works in FreeCAD's bundled Python.
 
 ## Installation
 
@@ -195,6 +240,7 @@ gpt4freecad/
 ├── llm/               provider abstraction                               (pure)
 │   ├── base.py        Provider ABC, HTTP, JSON extraction, registry
 │   ├── gemini.py  ·  openai.py  ·  anthropic.py
+│   ├── local.py       Machine Activation SDK: local GGUF models, no key
 ├── cad/
 │   ├── schema.py      CAD operation IR: validation + JSON schema         (pure)
 │   ├── prompts.py     system prompts + engineering/print addenda         (pure)
