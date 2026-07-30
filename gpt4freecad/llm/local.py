@@ -10,11 +10,12 @@ what acceleration it got, and what is degraded. No cloud API has an equivalent,
 and it is the difference between "the AI is slow" and "you are on CPU with a
 7B model".
 
-When the server is ``machine serve``, JSON mode is **grammar-constrained
-server-side**: the schema is compiled to GBNF and enforced inside llama.cpp's
-sampler, so a small local model *cannot* emit a malformed CAD program. A bare
-``llama-server`` gets no schema (see :func:`supports_schema`) and relies on the
-prompt plus the auto-repair harness instead.
+JSON mode is **grammar-constrained**, on every server. We compile the CAD schema
+to GBNF ourselves (:mod:`.gbnf`) and send a ready grammar, which llama.cpp
+enforces inside its sampler - so a small local model *cannot* emit a malformed
+CAD program, whether it is behind ``machine serve`` or a bare ``llama-server``
+this addon started. Asking a 4B model nicely for JSON fails constantly; this
+cannot.
 """
 
 from __future__ import annotations
@@ -58,8 +59,6 @@ class MachineProvider(Provider):
         self.activate()
 
         schema = request.json_schema if request.json_mode else None
-        if schema and not supports_schema(self.base_url):
-            schema = None  # see supports_schema(): a grammar here is a trap
         return _chat_via_http(self.base_url, request, schema, timeout)
 
     # ------------------------------------------------------------------ #
@@ -147,9 +146,6 @@ def activate_model(model_path: str, base_url: str) -> Optional[str]:
 
     _SERVER = backend
     _ACTIVE_URL = base_url
-    # A freshly started server is a bare llama-server, never `machine serve`;
-    # drop any cached answer from a previous occupant of this address.
-    _SUPPORTS_SCHEMA.pop(base_url.rstrip("/"), None)
     return status
 
 
@@ -189,35 +185,7 @@ def _reachable(base_url: str) -> bool:
         return False
 
 
-# --------------------------------------------------------------------------- #
-# Which flavour of server is on the other end
-#
-# `machine serve` compiles a JSON schema into a grammar itself and enforces it,
-# which is the guarantee that makes small local models usable for CAD. A bare
-# llama-server cannot: its own schema-to-grammar conversion of the CAD program
-# schema is pathologically slow - measured on llama.cpp b10182, even a
-# single-operation schema produced nothing in 40+ seconds, and the full one did
-# not finish in 400. Sending a schema there makes the model look broken.
-#
-# So we ask once, per address, and simply do not constrain a bare server. The
-# prompt still asks for JSON, the extractor is tolerant, and the auto-repair
-# harness catches what slips through - which is how the cloud providers that
-# have no grammar support have always worked here.
-# --------------------------------------------------------------------------- #
 _ACTIVE_URL: Optional[str] = None
-_SUPPORTS_SCHEMA: "dict[str, bool]" = {}
-
-
-def supports_schema(base_url: str) -> bool:
-    """True when this server enforces a JSON schema usefully (i.e. machine serve)."""
-    key = base_url.rstrip("/")
-    if key not in _SUPPORTS_SCHEMA:
-        try:
-            _get_json(f"{key}/machine/activation", 10)
-            _SUPPORTS_SCHEMA[key] = True
-        except LLMError:
-            _SUPPORTS_SCHEMA[key] = False
-    return _SUPPORTS_SCHEMA[key]
 
 
 def _port_of(base_url: str) -> int:
@@ -261,10 +229,21 @@ def _chat_via_http(base_url: str, request: ChatRequest,
     if not schema:
         return _content_of(_post_json(url, payload, timeout))
 
-    # Two spellings of the same request. `machine serve` compiles the
-    # OpenAI-style json_schema form itself; a bare llama-server only understands
-    # {"type": "json_object", "schema": ...} and answers the other form with an
-    # empty message after burning the whole token budget. Try each.
+    # Compile the schema ourselves and hand the server a ready grammar. Every
+    # llama.cpp server takes `grammar` and enforces it in the sampler, so this
+    # works the same on a bare llama-server we started as on `machine serve` -
+    # and it is what makes a small local model unable to emit a malformed CAD
+    # program. Compiling is a few milliseconds and the result is cached.
+    content = _content_of(
+        _post_json(url, dict(payload, grammar=_grammar_for(schema)), timeout),
+        required=False,
+    )
+    if content:
+        return content
+
+    # A server that ignored `grammar` gave us nothing to work with. Fall back to
+    # the two response_format spellings - servers disagree on which they take,
+    # and some answer the wrong one with an empty message rather than an error.
     for response_format in (
         {"type": "json_schema", "json_schema": {"schema": schema}},
         {"type": "json_object", "schema": schema},
@@ -277,9 +256,25 @@ def _chat_via_http(base_url: str, request: ChatRequest,
             return content
     raise LLMError(
         "The local model returned an empty reply for a schema-constrained "
-        "request. The server accepted the schema but produced nothing — try a "
+        "request. The server accepted the grammar but produced nothing — try a "
         "smaller/simpler request, or a stronger model."
     )
+
+
+# Compiling is cheap (~6 ms for the full CAD schema) but the schema is identical
+# on every request, so do it once per process.
+_GRAMMAR_CACHE: "dict[str, str]" = {}
+
+
+def _grammar_for(schema: dict) -> str:
+    key = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+    grammar = _GRAMMAR_CACHE.get(key)
+    if grammar is None:
+        from .gbnf import json_schema_to_gbnf
+
+        grammar = json_schema_to_gbnf(schema)
+        _GRAMMAR_CACHE[key] = grammar
+    return grammar
 
 
 def _content_of(data: dict, required: bool = True) -> str:

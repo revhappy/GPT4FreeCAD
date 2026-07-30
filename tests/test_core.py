@@ -912,52 +912,94 @@ def _json_mode_request():
     )
 
 
-def test_local_json_mode_sends_grammar_schema_to_machine_serve():
-    """A server that can enforce a schema gets one."""
-    captured = {}
-    originals = _patch_local(
-        captured, {"choices": [{"message": {"content": '{"operations": []}'}}]})
-    provider = get_provider("machine")
-    local_mod._SUPPORTS_SCHEMA[provider.base_url.rstrip("/")] = True
-    try:
-        provider.chat(_json_mode_request(), "")
-        fmt = captured["payload"]["response_format"]
-        assert fmt["type"] == "json_schema"
-        # The CAD program schema is what gets compiled to a GBNF grammar.
-        sent = fmt["json_schema"]["schema"]
-        assert sent["required"] == ["operations"]
-        branches = {b["properties"]["op"]["const"]: b
-                    for b in sent["properties"]["operations"]["items"]["anyOf"]}
-        assert "box" in branches
-        # The grammar must pin the dimensions too, not just the op name.
-        assert "length" in branches["box"]["required"]
-    finally:
-        _restore_local(originals)
-        local_mod._SUPPORTS_SCHEMA.clear()
+def test_local_json_mode_sends_a_compiled_grammar():
+    """Every local server gets a ready grammar, not a schema to convert.
 
-
-def test_local_json_mode_skips_the_schema_on_a_bare_llama_server():
-    """A bare llama-server must NOT be sent a schema.
-
-    Its own schema-to-grammar conversion of the CAD program schema is
-    pathologically slow (measured on llama.cpp b10182: a single-operation schema
-    returned nothing in 40s+, the full one did not finish in 400s). Constraining
-    there makes a working model look broken; the prompt, the tolerant JSON
-    extractor and the auto-repair harness cover it instead.
+    The addon used to probe for `machine serve` and skip enforcement entirely on
+    a bare llama-server. Compiling the grammar ourselves makes that distinction
+    irrelevant: llama.cpp takes `grammar` and enforces it in the sampler
+    everywhere, so a small model cannot emit a malformed program on any server.
     """
     captured = {}
     originals = _patch_local(
         captured, {"choices": [{"message": {"content": '{"operations": []}'}}]})
-    provider = get_provider("machine")
-    local_mod._SUPPORTS_SCHEMA[provider.base_url.rstrip("/")] = False
     try:
-        provider.chat(_json_mode_request(), "")
+        get_provider("machine").chat(_json_mode_request(), "")
+        grammar = captured["payload"]["grammar"]
         assert "response_format" not in captured["payload"]
-        # The request still goes through - just unconstrained.
-        assert captured["payload"]["messages"][0]["content"] == "a plate"
+        assert grammar.startswith("root ::= ")
+        # The grammar must pin each op's own fields, not just the op name -
+        # otherwise {"op": "box"} with no dimensions is grammatical.
+        assert '"\\"box\\""' in grammar
+        assert '"\\"length\\"" ws ":" ws number' in grammar
+        assert '"\\"operations\\""' in grammar
     finally:
         _restore_local(originals)
-        local_mod._SUPPORTS_SCHEMA.clear()
+        local_mod._GRAMMAR_CACHE.clear()
+
+
+def test_local_falls_back_when_a_server_ignores_the_grammar():
+    """An empty reply to a grammar must try the schema spellings, not give up."""
+    calls = []
+
+    def fake_post(url, payload, timeout):
+        calls.append(payload)
+        if "grammar" in payload:
+            return {"choices": [{"message": {"content": ""}}]}  # ignored it
+        return {"choices": [{"message": {"content": '{"operations": []}'}}]}
+
+    originals = (local_mod._post_json, local_mod._sdk_client)
+    local_mod._post_json = fake_post
+    local_mod._sdk_client = lambda base_url, timeout: None
+    try:
+        out = get_provider("machine").chat(_json_mode_request(), "")
+        assert out == '{"operations": []}'
+        assert "grammar" in calls[0]                       # grammar first
+        assert calls[1]["response_format"]["type"] == "json_schema"
+    finally:
+        local_mod._post_json, local_mod._sdk_client = originals
+        local_mod._GRAMMAR_CACHE.clear()
+
+
+def test_local_grammar_is_compiled_once_per_schema():
+    """The schema is identical every request; compiling it each time is waste."""
+    captured = {}
+    originals = _patch_local(
+        captured, {"choices": [{"message": {"content": "{}"}}]})
+    try:
+        local_mod._GRAMMAR_CACHE.clear()
+        provider = get_provider("machine")
+        provider.chat(_json_mode_request(), "")
+        provider.chat(_json_mode_request(), "")
+        assert len(local_mod._GRAMMAR_CACHE) == 1
+    finally:
+        _restore_local(originals)
+        local_mod._GRAMMAR_CACHE.clear()
+
+
+def test_local_gbnf_matches_the_sdk_emitter():
+    """The vendored compiler must agree with the SDK's parity fixture.
+
+    This file is a copy of the SDK's gbnf.py; the SDK pins that against the
+    TypeScript emitter. If the copy drifts, grammars stop matching what the
+    SDK (and `machine serve`) would build for the same schema.
+    """
+    from gpt4freecad.llm.gbnf import json_schema_to_gbnf
+
+    cases = [
+        ({"type": "string"}, "root ::= string"),
+        ({"enum": ["a", "b"]}, r'"\"a\"" | "\"b\""'),
+        ({"type": "array", "items": {"type": "integer"}, "minItems": 1},
+         r'"[" ws integer (ws "," ws integer)* ws "]"'),
+    ]
+    for case_schema, expected in cases:
+        assert expected in json_schema_to_gbnf(case_schema)
+    # The real CAD schema compiles, and fast.
+    import time
+    started = time.monotonic()
+    grammar = json_schema_to_gbnf(schema.json_schema())
+    assert time.monotonic() - started < 1.0
+    assert grammar.count("::=") > 20
 
 
 def test_local_empty_reply_and_missing_server_are_clear():
