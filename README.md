@@ -138,42 +138,44 @@ PySide that ships with FreeCAD.
 Pick the **Local (Machine Activation)** provider to run a model on your own machine. No key,
 no account, works offline, and nothing you design leaves the computer.
 
-It talks to a [Machine Activation SDK](https://github.com/revhappy/MachineActivationSDK)
-server — `llama.cpp` under the hood, so any GGUF model works:
+**Setup is one step: choose a `.gguf` file.**
 
-```bash
-npm i machineai-activation          # provides the `machine` CLI
-machine serve ./models/your-model.gguf
-```
+**⚙ Settings → Local (Machine Activation) → Model → Choose…**, pick any GGUF model, save.
+That's it. On first use GPT4FreeCAD downloads a `llama.cpp` inference backend for your
+machine (~20 MB, once, cached in `~/.machine/llama-cpp` and shared with the
+[Machine Activation SDK](https://github.com/revhappy/MachineActivationSDK)), loads your
+model, and stops it when FreeCAD closes. No terminal, no server to start, and **no
+`pip install`** — it uses only the Python that ships inside FreeCAD.
 
-Then in FreeCAD: **⚙ Settings → Local (Machine Activation)**, confirm the server URL
-(default `http://127.0.0.1:8177`), and press **Test connection**. Rather than a generic
-"OK" it reports the *activation contract* — whether the model actually fits this machine,
+Loading a multi-gigabyte model takes a moment the first time you press Generate; it runs on
+the background worker, so FreeCAD stays responsive, and the model stays loaded afterwards.
+
+*Already running your own server?* Tick **Advanced** and point the server URL at it — the
+model field can stay empty. If that server is
+[`machine serve`](https://github.com/revhappy/MachineActivationSDK), **Test connection**
+additionally reports the *activation contract*: whether the model actually fits this machine,
 which acceleration it got (CPU/GPU/NPU), and anything degraded. That is the difference
 between "the AI is slow" and "you are running a 7B model on CPU".
 
-**Structured mode gets a hard guarantee locally.** The CAD program schema — one branch per
-operation, carrying that operation's required fields and types — is compiled to a GBNF grammar
-and enforced inside llama.cpp's sampler. A `box` without its dimensions, a bad enum, a
-malformed vector: the model is *unable* to produce them. Asking a 4B model nicely for JSON
-fails constantly; this cannot.
+**Optional: a hard guarantee on the output shape.** When the local server is
+`machine serve`, the CAD program schema — one branch per operation, carrying that operation's
+required fields and types — is compiled to a GBNF grammar and enforced inside llama.cpp's
+sampler. A `box` without its dimensions, a bad enum, a malformed vector: the model is *unable*
+to produce them. Verified on `gemma-4-E4B-it` (IQ4_NL, CPU): plate-with-a-hole and
+filleted-cube both produced valid programs on the first attempt.
 
-The grammar guarantees each operation's shape. Cross-operation rules — references resolving to
-objects defined earlier, unique names, positive dimensions — stay with the validator, backed by
-the auto-repair harness above. Verified on `gemma-4-E4B-it` (IQ4_NL, CPU): plate-with-a-hole
-and filleted-cube both produced valid programs on the first attempt, no repair round needed.
+GPT4FreeCAD detects this automatically and **does not** send a schema to a plain
+`llama-server`, because llama.cpp's own schema-to-grammar conversion of this schema is
+pathologically slow — measured on build b10182, even a single-operation schema returned nothing
+in 40 s and the full one did not finish in 400 s. Constraining there would make a working model
+look broken. Instead the prompt asks for JSON, the extractor is tolerant of fences and prose,
+and the auto-repair harness fixes what slips through — exactly how the cloud providers that
+have no grammar support have always worked here. So local models work either way; with
+`machine serve` you additionally get the guarantee.
 
-> **Known limitation — which local server you run matters.** That result is through
-> `machine serve`, which compiles the schema to a grammar with the SDK's own converter. Pointed
-> at a **bare `llama-server`**, the same schema goes through llama.cpp's built-in converter and
-> sampling becomes impractically slow (a request that takes ~40 s via `machine serve` did not
-> finish in 10 minutes). Until that is addressed, use `machine serve` for Structured and
-> Engineering modes on a local model; a bare `llama-server` is fine for Python mode, which has
-> no grammar. Tracked as a follow-up.
-
-Optionally `pip install machine-activation` (dependency-free, stdlib only) for the full
-activation report. Without it GPT4FreeCAD speaks the same HTTP directly, so the provider
-still works in FreeCAD's bundled Python.
+Nothing to install. GPT4FreeCAD downloads, starts and stops the backend using only the
+standard library inside FreeCAD's own Python. `pip install machine-activation` is optional and
+buys one thing: the activation report on **Test connection**.
 
 ## Installation
 

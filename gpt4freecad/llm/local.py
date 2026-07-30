@@ -54,14 +54,13 @@ class MachineProvider(Provider):
     def chat(self, request: ChatRequest, api_key: str = "") -> str:
         """Run one local chat turn. ``api_key`` is accepted but unused."""
         timeout = max(request.timeout, _MIN_TIMEOUT)
-        schema = request.json_schema if request.json_mode else None
         # Activate first if needed. Generation already runs on a background
-        # worker, so a 30-second model load cannot block FreeCAD's UI.
+        # worker, so a 40-second model load cannot block FreeCAD's UI.
         self.activate()
-        client = _sdk_client(self.base_url, timeout)
 
-        if client is not None:
-            return _chat_via_sdk(client, request, schema)
+        schema = request.json_schema if request.json_mode else None
+        if schema and not supports_schema(self.base_url):
+            schema = None  # see supports_schema(): a grammar here is a trap
         return _chat_via_http(self.base_url, request, schema, timeout)
 
     # ------------------------------------------------------------------ #
@@ -135,34 +134,24 @@ def activate_model(model_path: str, base_url: str) -> Optional[str]:
     if _reachable(base_url):
         return None  # Something is already serving here - reuse it.
 
+    # Standard library only, on purpose: FreeCAD embeds its own Python, and
+    # telling a user to `pip install` into it is not a setup step most people
+    # can even carry out. See backend.py.
+    from . import backend
+
+    global _ACTIVE_URL
     try:
-        from machine_activation import LlamaServer
-    except Exception as exc:  # noqa: BLE001
-        raise LLMError(
-            "A local model is configured, but the 'machine-activation' package "
-            "is not installed in FreeCAD's Python, so GPT4FreeCAD cannot start "
-            f"the model itself ({exc}).\n\n"
-            "Install it (it has no dependencies of its own):\n"
-            "    pip install machine-activation"
-        ) from exc
+        status = backend.start(model_path, base_url, port=_port_of(base_url),
+                               on_log=_log_line)
+    except backend.BackendError as exc:
+        raise LLMError(str(exc)) from exc
 
-    if not os.path.isfile(model_path):
-        raise LLMError(f"Local model file not found:\n    {model_path}")
-
-    try:
-        # auto_fetch: on a machine with no inference backend yet, download one
-        # into the per-user cache instead of sending the user to a terminal.
-        # LlamaServer runs llama-server directly - no Node.js, no npm, no CLI.
-        server = LlamaServer(
-            model_path, port=_port_of(base_url), auto_fetch=True, on_log=_log_line)
-        server.start()
-    except Exception as exc:  # noqa: BLE001 - MachineError and friends
-        raise LLMError(
-            f"Could not start the local model:\n    {model_path}\n\n{exc}"
-        ) from exc
-
-    _SERVER = server
-    return f"Loaded {os.path.basename(model_path)} — serving at {server.base_url}"
+    _SERVER = backend
+    _ACTIVE_URL = base_url
+    # A freshly started server is a bare llama-server, never `machine serve`;
+    # drop any cached answer from a previous occupant of this address.
+    _SUPPORTS_SCHEMA.pop(base_url.rstrip("/"), None)
+    return status
 
 
 def _log_line(line: str) -> None:
@@ -176,26 +165,22 @@ def _log_line(line: str) -> None:
 
 
 def deactivate_model() -> bool:
-    """Stop a server we started. True if one was running."""
+    """Stop a model we started. True if one was running."""
     global _SERVER
-    if _SERVER is None:
+    module, _SERVER = _SERVER, None
+    if module is None:
         return False
     try:
-        _SERVER.stop()
+        return bool(module.stop())
     except Exception:  # noqa: BLE001 - shutting down should never raise upward
-        pass
-    _SERVER = None
-    return True
+        return False
 
 
 def activated_model() -> Optional[str]:
-    """The base URL of a server this process started, if any."""
-    if _SERVER is None:
-        return None
-    try:
-        return _SERVER.base_url
-    except Exception:  # noqa: BLE001 - not running
-        return None
+    """The base URL of a model this process started, if any."""
+    from . import backend
+
+    return _ACTIVE_URL if backend.started_here() else None
 
 
 def _reachable(base_url: str) -> bool:
@@ -203,6 +188,37 @@ def _reachable(base_url: str) -> bool:
         return bool(_get_json(f"{base_url.rstrip('/')}/health", 5).get("status") == "ok")
     except LLMError:
         return False
+
+
+# --------------------------------------------------------------------------- #
+# Which flavour of server is on the other end
+#
+# `machine serve` compiles a JSON schema into a grammar itself and enforces it,
+# which is the guarantee that makes small local models usable for CAD. A bare
+# llama-server cannot: its own schema-to-grammar conversion of the CAD program
+# schema is pathologically slow - measured on llama.cpp b10182, even a
+# single-operation schema produced nothing in 40+ seconds, and the full one did
+# not finish in 400. Sending a schema there makes the model look broken.
+#
+# So we ask once, per address, and simply do not constrain a bare server. The
+# prompt still asks for JSON, the extractor is tolerant, and the auto-repair
+# harness catches what slips through - which is how the cloud providers that
+# have no grammar support have always worked here.
+# --------------------------------------------------------------------------- #
+_ACTIVE_URL: Optional[str] = None
+_SUPPORTS_SCHEMA: "dict[str, bool]" = {}
+
+
+def supports_schema(base_url: str) -> bool:
+    """True when this server enforces a JSON schema usefully (i.e. machine serve)."""
+    key = base_url.rstrip("/")
+    if key not in _SUPPORTS_SCHEMA:
+        try:
+            _get_json(f"{key}/machine/activation", 10)
+            _SUPPORTS_SCHEMA[key] = True
+        except LLMError:
+            _SUPPORTS_SCHEMA[key] = False
+    return _SUPPORTS_SCHEMA[key]
 
 
 def _port_of(base_url: str) -> int:
@@ -227,27 +243,10 @@ def _sdk_client(base_url: str, timeout: float):
         return None
 
 
-def _chat_via_sdk(client, request: ChatRequest, schema: Optional[dict]) -> str:
-    """Generate through the SDK client, mapping its errors onto LLMError."""
-    messages = list(request.messages)
-    try:
-        if schema:
-            data = client.chat_json(
-                messages, schema,
-                max_tokens=request.max_tokens, temperature=request.temperature,
-            )
-            # The engine parses text, and a constrained dict is already valid.
-            return json.dumps(data)
-        return client.chat(
-            messages,
-            max_tokens=request.max_tokens, temperature=request.temperature,
-        )
-    except Exception as exc:  # noqa: BLE001 - MachineError/ModelNotReady/etc.
-        raise LLMError(_not_running_hint(client.base_url, exc)) from exc
-
-
 # --------------------------------------------------------------------------- #
-# Transport: plain stdlib HTTP fallback
+# Transport: plain stdlib HTTP - the only path, so FreeCAD's bundled Python
+# needs nothing installed. The SDK client is still used for the activation
+# report, which is a thing only `machine serve` can answer.
 # --------------------------------------------------------------------------- #
 def _chat_via_http(base_url: str, request: ChatRequest,
                    schema: Optional[dict], timeout: int) -> str:
