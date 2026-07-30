@@ -32,6 +32,20 @@ OUTPUT RULES (critical):
 - Use "placement" to position primitives. pos is the local origin of the primitive.
   (box/cone/cylinder grow from their origin along +Z; sphere/torus are centred.)
 
+FIELD TYPES (the operation list below uses these names - get the shape exactly right):
+- number      a number, e.g. 12.5              - int     a whole number, e.g. 4
+- string      text in quotes, e.g. "base"      - bool    true or false
+- vec3        EXACTLY three numbers: [x, y, z]
+- intlist     a LIST of whole numbers, e.g. [1, 3, 5] - never a bare number
+- strlist     a LIST of names, e.g. ["a", "b"]
+- profile     a LIST of 2D points, each EXACTLY two numbers: [[0, 0], [10, 0], [10, 5]]
+              (points are 2D - never [x, y, z] - and you need at least 3 of them)
+- placement   {{"pos": [x, y, z]}}, optionally with {{"rotation": {{"axis": [x, y, z], "angle": 45}}}}
+
+Every "name" must be UNIQUE across the whole program - never reuse one, not even
+for the finished result. To modify an object, reference its name in a new
+operation with a new name of its own.
+
 AVAILABLE OPERATIONS:
 {schema.operations_reference()}
 
