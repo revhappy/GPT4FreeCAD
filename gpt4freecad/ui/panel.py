@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from functools import partial
 
 from .qt import QtCore, QtGui, QtWidgets
@@ -25,7 +26,9 @@ _MODE_INDEX = {m[1]: i for i, m in enumerate(_MODES)}
 # Gemini 3 reasoning depth. "Default" = let the model decide (don't send the param).
 _THINKING = [("Default", "default"), ("Minimal", "minimal"), ("Low", "low"),
              ("Medium", "medium"), ("High", "high")]
-_UI_VERSION = "compact-5"
+_UI_VERSION = "compact-6"
+# Shown in the model dropdown when the local provider has no .gguf chosen yet.
+_NO_LOCAL_MODEL = "(choose a model…)"
 
 
 class GPTPanel(QtWidgets.QWidget):
@@ -476,8 +479,21 @@ class GPTPanel(QtWidgets.QWidget):
         provider = self._current_provider()
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
-        self.model_combo.addItems(provider.default_models)
-        self.model_combo.setCurrentText(self.cfg.model(provider.id, provider.default_model))
+        if provider.id == "machine":
+            # A local provider has no catalogue to list: the "model" is whichever
+            # .gguf file was chosen in Settings. Show its filename, so the panel
+            # states what will actually run instead of sitting empty.
+            path = self.cfg.machine_model_path()
+            label = os.path.basename(path) if path else _NO_LOCAL_MODEL
+            self.model_combo.addItem(label)
+            self.model_combo.setCurrentText(label)
+            self.model_combo.setToolTip(
+                path or "Open Settings (…) and choose a .gguf model file.")
+        else:
+            self.model_combo.addItems(provider.default_models)
+            self.model_combo.setCurrentText(
+                self.cfg.model(provider.id, provider.default_model))
+            self.model_combo.setToolTip("Model")
         self.model_combo.blockSignals(False)
 
     def _any_key_set(self) -> bool:
@@ -513,8 +529,12 @@ class GPTPanel(QtWidgets.QWidget):
             self.cfg.set_thinking_level(self.thinking_combo.currentData())
 
     def _on_model_changed(self, text):
-        if not self._loading:
-            self.cfg.set_model(self.provider_combo.currentData(), text.strip())
+        if self._loading:
+            return
+        provider_id = self.provider_combo.currentData()
+        if provider_id == "machine":
+            return  # the local "model" is the file path, set in Settings
+        self.cfg.set_model(provider_id, text.strip())
 
     def _on_mode_changed(self, _index):
         mode = self._current_mode()
@@ -668,13 +688,17 @@ class GPTPanel(QtWidgets.QWidget):
         provider = self._current_provider()
         if provider.id == "openai":
             provider.endpoint = self.cfg.openai_endpoint()
+        model = self.model_combo.currentText().strip()
         if provider.id == "machine":
             provider.base_url = self.cfg.machine_base_url()
             provider.model_path = self.cfg.machine_model_path()
+            # The dropdown shows a filename (or a placeholder) for information;
+            # neither is a model id the server would recognise.
+            model = ""
         return {
             "provider": provider,
             "api_key": self.cfg.api_key(provider.id),
-            "model": self.model_combo.currentText().strip() or provider.default_model,
+            "model": model or provider.default_model,
             "units": self.units_combo.currentText(),
             "temperature": self.cfg.temperature(),
             "max_tokens": self.cfg.max_tokens(),
@@ -711,6 +735,8 @@ class GPTPanel(QtWidgets.QWidget):
             self._set_status(f"No API key for {ctx['provider'].label}.", error=True)
             self._log_error(f"No API key set for {ctx['provider'].label}. Open Settings (⚙).")
             return
+        if not self._local_model_ready(ctx["provider"]):
+            return
         if log_as_user:
             self._log_user(user_message)
         self._pending_user = user_message
@@ -723,6 +749,20 @@ class GPTPanel(QtWidgets.QWidget):
             print_profile=ctx["print_profile"], part_layout=ctx["part_layout"],
         )
         self.run_worker(fn, self._on_generated)
+
+    def _local_model_ready(self, provider) -> bool:
+        """Say plainly that no local model is chosen, before spending a request."""
+        if provider.id != "machine" or self.cfg.machine_model_path():
+            return True
+        from ..llm import backend
+
+        if backend.is_serving(self.cfg.machine_base_url()):
+            return True  # attaching to a server someone else started
+        self._set_status("No local model chosen.", error=True)
+        self._log_error(
+            "No local model chosen. Open Settings (…) → Local (Machine "
+            "Activation) → Model → Choose… and pick a .gguf file.")
+        return False
 
     def _on_generated(self, result):
         self.last_result = result
