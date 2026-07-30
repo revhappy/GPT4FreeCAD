@@ -85,6 +85,17 @@ OPERATIONS: Dict[str, Dict[str, Any]] = {
         "refs": [],
         "positive": ["height"],
     },
+    "revolve": {
+        "doc": "Revolve a closed 2D profile around the Z axis - the lathe-style op for "
+               "flanges, shafts, pulleys, vases. profile points are [r, z]: r = distance "
+               "from the axis (>= 0), z = height. At least 3 points, do not repeat the "
+               "first point. Optional 'angle' (deg, default 360) for a partial revolve.",
+        "required": {"name": STRING, "profile": PROFILE},
+        "optional": {"angle": NUMBER, "placement": PLACEMENT},
+        "defines": True,
+        "refs": [],
+        "positive": ["angle"],
+    },
     "cut": {
         "doc": "Boolean difference: base minus tool.",
         "required": {"name": STRING, "base": STRING, "tool": STRING},

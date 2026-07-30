@@ -1,20 +1,20 @@
 """Machine Activation SDK adapter - local GGUF models, no cloud, no API key.
 
-Talks to a ``machine serve`` process (the Machine Activation SDK's local
-inference server, llama.cpp under the hood). Two transports, same wire format:
+Talks to a local inference server (llama.cpp under the hood) - either a
+``machine serve`` process the user started, or a bare ``llama-server`` this
+addon launches itself via :mod:`.backend`. Chat always goes over plain stdlib
+HTTP so the provider works in FreeCAD's bundled Python without ``pip install``;
+the SDK's ``machine_activation`` client, when importable, is used for one thing
+only: the *activation report* - whether the model actually fits this machine,
+what acceleration it got, and what is degraded. No cloud API has an equivalent,
+and it is the difference between "the AI is slow" and "you are on CPU with a
+7B model".
 
-* If the ``machine_activation`` Python client is importable we use it, which
-  also gives us the *activation report* - whether the model actually fits this
-  machine, what acceleration it got, and what is degraded. No cloud API has an
-  equivalent, and it is the difference between "the AI is slow" and "you are on
-  CPU with a 7B model".
-* Otherwise we speak the same HTTP directly with the standard library, so the
-  provider works in FreeCAD's bundled Python without ``pip install``.
-
-Either way JSON mode is **grammar-constrained server-side**: the schema is
-compiled to GBNF and enforced inside llama.cpp's sampler, so a small local model
-*cannot* emit a malformed CAD program. Asking a 4B model nicely for JSON fails
-constantly; this cannot.
+When the server is ``machine serve``, JSON mode is **grammar-constrained
+server-side**: the schema is compiled to GBNF and enforced inside llama.cpp's
+sampler, so a small local model *cannot* emit a malformed CAD program. A bare
+``llama-server`` gets no schema (see :func:`supports_schema`) and relies on the
+prompt plus the auto-repair harness instead.
 """
 
 from __future__ import annotations
@@ -115,13 +115,13 @@ class MachineProvider(Provider):
 # --------------------------------------------------------------------------- #
 # Activation: start the model ourselves rather than making the user do it
 #
-# The SDK's MachineServer supervises `machine serve` - it reuses a healthy server
-# on the same port instead of loading a second copy of a multi-gigabyte model,
-# restarts it if llama.cpp dies, and tears the whole process tree down at exit.
-# We keep one per process: FreeCAD is long-lived, and reloading the panel must
-# not strand a loaded model or pay the load cost twice.
+# backend.py supervises a directly-spawned llama-server - it reuses a healthy
+# server on the same port instead of loading a second copy of a multi-gigabyte
+# model, and stops the process at interpreter exit. We keep one per process:
+# FreeCAD is long-lived, and reloading the panel must not strand a loaded model
+# or pay the load cost twice.
 # --------------------------------------------------------------------------- #
-_SERVER = None  # machine_activation.MachineServer, once activated
+_SERVER = None  # the `backend` module once it has started a server, else None
 
 
 def activate_model(model_path: str, base_url: str) -> Optional[str]:

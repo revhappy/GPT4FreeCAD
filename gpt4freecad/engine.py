@@ -37,7 +37,7 @@ def generate(
     units: str = "mm",
     temperature: float = 0.2,
     max_tokens: int = 4096,
-    thinking_level: str = None,
+    thinking_level: Optional[str] = None,
     print_profile=None,
     part_layout: str = "fused",
 ) -> GenerationResult:
@@ -108,7 +108,13 @@ def _generate_structured(
                         json_schema=schema.json_schema()),
             api_key,
         )
-        program = schema.validate_program(extract_json(raw2))  # may raise; let it
+        try:
+            program = schema.validate_program(extract_json(raw2))
+        except (LLMError, schema.SchemaError) as second_error:
+            # The panel's repair rounds need the reply itself - without it the
+            # model is asked to fix a program it cannot see.
+            second_error.raw_reply = raw2
+            raise
         return GenerationResult(
             mode="structured", raw=raw2, program=program, repaired=True, messages=messages
         )
@@ -126,7 +132,7 @@ def generate_step(
     print_profile=None,
     temperature: float = 0.2,
     max_tokens: int = 4096,
-    thinking_level: str = None,
+    thinking_level: Optional[str] = None,
     part_layout: str = "fused",
 ) -> GenerationResult:
     """Generate ONLY the next operation(s) to append to an existing program.
@@ -164,7 +170,11 @@ def generate_step(
                         json_schema=_step_schema()),
             api_key,
         )
-        new_ops = _extract_new_ops(raw2, program)
+        try:
+            new_ops = _extract_new_ops(raw2, program)
+        except (LLMError, schema.SchemaError) as second_error:
+            second_error.raw_reply = raw2
+            raise
         return GenerationResult(
             mode="engineering", raw=raw2, program=new_ops, repaired=True, messages=messages
         )

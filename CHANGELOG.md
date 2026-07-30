@@ -1,5 +1,61 @@
 # GPT4FreeCAD Changelog
 
+## [2.4.1] - 2026-07-30
+
+A lathe, and a hardening pass over the last two releases.
+
+### Added
+- **`revolve` operation.** Spin a closed `[r, z]` profile around the Z axis —
+  `r` is the distance from the axis, `z` the height — with an optional `angle`
+  for a partial revolve. This was the IR's biggest expressiveness gap: flanges,
+  shafts, pulleys, bottles and vases previously had to be approximated with a
+  stack of boolean primitives. Points behind the axis (`r < 0`) are rejected
+  with an explanation rather than producing a self-intersecting solid.
+- **Unload button for the local model** (Settings → Local), freeing its memory
+  without restarting FreeCAD.
+
+### Fixed
+- **The Python-mode deny-list was bypassed on every auto-run.** `prechecked=True`
+  was passed unconditionally, so with *Build automatically* on (the default)
+  model-generated Python ran unreviewed with the safety check disabled. It is
+  now skipped only for an explicit **Build** click, where the user has seen and
+  can edit the code.
+- **A launched local model outlived FreeCAD.** Neither `deactivate_model()` nor
+  `backend.stop()` had a caller, and on Windows a child process survives its
+  parent — closing FreeCAD stranded a multi-gigabyte `llama-server`. The
+  backend now registers an `atexit` hook when it starts one.
+- **"Test connection" failed on reasoning models.** It asked for 16 output
+  tokens; on models that think before answering (Claude 5, GPT-5, Gemini 3)
+  thinking spends the same budget, so a valid key reported an empty reply.
+  Raised to 512.
+- **Claude 5 plans arrived truncated.** Thinking shares `max_tokens` with the
+  visible reply, so the 4096 default cut complex programs off mid-plan. The
+  adapter now floors thinking-by-default models at 16384, mirroring what the
+  Gemini adapter already did for Gemini 3.
+- **The OpenAI adapter 400'd on current models.** gpt-5.x and the o-series
+  require `max_completion_tokens` and reject a custom `temperature`; the
+  adapter now sends the right shape per model family, applies a reasoning
+  budget floor, and its default model list leads with GPT-5 instead of GPT-4o.
+- **Testing a local model froze the whole application.** Activation ran on the
+  GUI thread and can take up to 900 s to load weights; it now runs on a worker
+  thread behind a progress dialog.
+- **Repair rounds asked the model to fix a plan it could not see.** A reply that
+  fails validation never enters the conversation history, so rounds 2+ received
+  only an error message. The rejected reply is now attached to the error and
+  echoed back (truncated) in the repair prompt.
+- Gemini 3 requests no longer share the 120 s timeout with non-thinking models
+  (raised to 300 s, matching Anthropic).
+- The conversation history is capped at 24 messages, so a long session cannot
+  grow the prompt — and its cost — without bound.
+
+### Changed
+- Settings no longer shows a second, empty **Model** row for the local provider;
+  its model is the `.gguf` file picked above.
+- Removed ~215 lines of dead code left over from the compact-UI rewrite
+  (`_build_legacy_ui` in the panel and the engineering widget, the unused shape
+  hints, and the `structured_system_prompt` shim).
+- 111 unit tests (was 104).
+
 ## [2.4.0] - 2026-07-29
 
 Run it on your own machine, and stop hand-holding failed builds.

@@ -9,7 +9,8 @@ Layout::
 
     gpt4freecad/
         config.py          preferences + API-key storage (FreeCAD ParamGet)
-        llm/               provider abstraction (OpenAI, Anthropic, Gemini)
+        llm/               provider abstraction (OpenAI, Anthropic, Gemini, local)
+        harness.py         auto-repair budget + loop guard               (pure)
         cad/schema.py      CAD operation IR + JSON schema + validation  (pure)
         cad/prompts.py     system prompts                               (pure)
         cad/interpreter.py IR -> parametric FreeCAD objects             (FreeCAD)
@@ -17,6 +18,6 @@ Layout::
         workbench.py       Gui.Workbench registration                  (FreeCAD)
 """
 
-__version__ = "2.1.0"
+__version__ = "2.4.1"
 __author__ = "Robb Sharma"
 __all__ = ["__version__"]

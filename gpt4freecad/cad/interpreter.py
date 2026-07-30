@@ -281,6 +281,27 @@ def _extrude(op, doc, _objects):
     return obj
 
 
+def _revolve(op, doc, _objects):
+    """Revolve a closed [r, z] profile around the Z axis (lathe-style solid)."""
+    for r, _z in op["profile"]:
+        if r < 0:
+            raise InterpreterError(
+                "revolve profile points must have r >= 0 (r is the distance "
+                f"from the Z axis); got r={r}. Keep the whole profile on one "
+                "side of the axis."
+            )
+    points = [Vector(r, 0, z) for r, z in op["profile"]]
+    points.append(points[0])  # close the wire
+    wire = Part.makePolygon(points)
+    face = Part.Face(wire)
+    angle = op.get("angle") or 360
+    solid = face.revolve(Vector(0, 0, 0), Vector(0, 0, 1), angle)
+    obj = doc.addObject("Part::Feature", op["name"])
+    obj.Shape = solid
+    obj.Placement = _placement(op.get("placement"))
+    return obj
+
+
 # --------------------------------------------------------------------------- #
 # Boolean handlers
 # --------------------------------------------------------------------------- #
@@ -590,6 +611,7 @@ _HANDLERS = {
     "cone": _cone,
     "torus": _torus,
     "extrude": _extrude,
+    "revolve": _revolve,
     "cut": _cut,
     "fuse": _multi("Part::MultiFuse"),
     "common": _multi("Part::MultiCommon"),
