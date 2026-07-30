@@ -22,6 +22,22 @@ class InterpreterError(Exception):
     """Raised when a (valid) program cannot be realised as geometry."""
 
 
+# Notes emitted by handlers when they deterministically corrected something
+# (clamped a radius, dropped a bad edge index). Drained into the build log
+# after each op so the panel can surface them. Builds run on the main thread,
+# so a module-level list is safe.
+_PENDING_NOTES: List[str] = []
+
+
+def _note(text: str) -> None:
+    _PENDING_NOTES.append(text)
+
+
+def _drain_notes() -> List[str]:
+    notes, _PENDING_NOTES[:] = list(_PENDING_NOTES), []
+    return notes
+
+
 def _placement(spec: Optional[dict]) -> App.Placement:
     """Build an App.Placement from an IR placement dict (pos + rotation)."""
     if not spec:
@@ -38,8 +54,12 @@ def _placement(spec: Optional[dict]) -> App.Placement:
 def _run_ops(operations, doc, objects: Dict[str, Any], log: List[str]):
     """Dispatch each op in order, recording created objects. No transaction here."""
     result = None
-    for op in operations:
-        obj = _dispatch(op, doc, objects)
+    for index, op in enumerate(operations, start=1):
+        try:
+            obj = _dispatch(op, doc, objects)
+        except Exception as exc:  # noqa: BLE001 - re-raise with op context
+            raise InterpreterError(_op_error(index, op, objects, exc)) from exc
+        log.extend(f"note: {n}" for n in _drain_notes())
         if obj is not None:
             objects[op["name"]] = obj
             result = obj
@@ -47,6 +67,18 @@ def _run_ops(operations, doc, objects: Dict[str, Any], log: List[str]):
         else:
             log.append(f"{op['op']} {op.get('target', '')}")
     return result
+
+
+def _op_error(index, op, objects, exc) -> str:
+    """One precise, model-repairable sentence about which op failed and why."""
+    label = op.get("name") or op.get("target") or op.get("source") or "?"
+    if isinstance(exc, KeyError):
+        detail = f"references undefined object {exc}"
+    else:
+        detail = str(exc)
+    built = ", ".join(f"'{n}'" for n in objects) or "none"
+    return (f"operation #{index} '{op['op']}' ('{label}') failed: {detail} "
+            f"[operations before it succeeded; objects built so far: {built}]")
 
 
 def _check_built(objects: Dict[str, Any]) -> None:
@@ -66,6 +98,35 @@ def _check_built(objects: Dict[str, Any]) -> None:
             )
 
 
+def _check_booleans(operations, objects: Dict[str, Any]) -> None:
+    """Raise if a cut/hole removed no material - a silently-missed boolean.
+
+    A tool that does not intersect its target still 'succeeds' and leaves a
+    valid shape, so volume comparison is the only way to catch it.
+    """
+    for op in operations:
+        if op["op"] not in ("cut", "hole"):
+            continue
+        source_name = op.get("base") or op.get("target")
+        result_obj = objects.get(op["name"])
+        source_obj = objects.get(source_name)
+        if result_obj is None or source_obj is None:
+            continue
+        try:
+            v_result = float(result_obj.Shape.Volume)
+            v_source = float(source_obj.Shape.Volume)
+        except Exception:
+            continue
+        if v_source <= 0:
+            continue
+        if v_result >= v_source - max(1e-6, 1e-9 * v_source):
+            raise InterpreterError(
+                f"'{op['name']}' ({op['op']}) removed no material from "
+                f"'{source_name}' - the tool does not intersect it. Check the "
+                "placement and size of the cutting tool."
+            )
+
+
 def build_program(operations: List[Dict[str, Any]], doc=None,
                   group_separate: bool = False) -> Tuple[Any, List[str]]:
     """Build ``operations`` into ``doc`` (active document if None).
@@ -79,6 +140,7 @@ def build_program(operations: List[Dict[str, Any]], doc=None,
 
     objects: Dict[str, Any] = {}
     log: List[str] = []
+    _drain_notes()
     doc.openTransaction("GPT4FreeCAD")
     try:
         result = _run_ops(operations, doc, objects, log)
@@ -86,6 +148,7 @@ def build_program(operations: List[Dict[str, Any]], doc=None,
             _group_visible_components(doc, objects, log)
         doc.recompute()
         _check_built(objects)
+        _check_booleans(operations, objects)
         doc.commitTransaction()
     except Exception as exc:  # noqa: BLE001 - report any build failure cleanly
         doc.abortTransaction()
@@ -109,6 +172,7 @@ def rebuild(program: List[Dict[str, Any]], doc=None,
 
     objects: Dict[str, Any] = {}
     log: List[str] = []
+    _drain_notes()
     doc.openTransaction("GPT4FreeCAD rebuild")
     try:
         for name in reversed(list(prior_names or [])):
@@ -124,6 +188,7 @@ def rebuild(program: List[Dict[str, Any]], doc=None,
                 objects["__assembly__"] = group
         doc.recompute()
         _check_built(objects)
+        _check_booleans(program, objects)
         doc.commitTransaction()
     except Exception as exc:  # noqa: BLE001
         doc.abortTransaction()
@@ -258,12 +323,12 @@ def _modifiable_edge_ids(shape):
     return ids
 
 
-def _edge_list(op, target, value_keys):
-    """Return Part::Fillet/Chamfer edge tuples.
+def _edge_ids(op, target):
+    """1-based edge ids a fillet/chamfer should act on.
 
-    ``value_keys`` is ('radius',) or ('size',); the value is used for both ends.
-    Honours an explicit 1-based 'edges' list, else applies to every edge that
-    can actually be modified (see :func:`_modifiable_edge_ids`).
+    Honours an explicit 'edges' list but drops out-of-range indices (with a
+    note) instead of failing the build; falls back to every modifiable edge
+    when nothing usable was requested.
     """
     doc = target.Document
     doc.recompute()  # ensure target.Shape exists so we can count edges
@@ -271,43 +336,65 @@ def _edge_list(op, target, value_keys):
     if shape is None or shape.isNull() or not shape.Edges:
         raise InterpreterError(f"'{op['target']}' has no edges to modify.")
     n_edges = len(shape.Edges)
-    value = op[value_keys[0]]
 
     if "edges" in op and op["edges"]:
-        ids = op["edges"]
-        for i in ids:
-            if i < 1 or i > n_edges:
-                raise InterpreterError(
-                    f"edge index {i} out of range for '{op['target']}' "
-                    f"(has {n_edges} edges)."
-                )
-    else:
-        ids = _modifiable_edge_ids(shape)
-        if not ids:
-            raise InterpreterError(
-                f"'{op['target']}' has no edges that can be filleted/chamfered."
-            )
-    return [(int(i), float(value), float(value)) for i in ids]
+        ids = [int(i) for i in op["edges"] if 1 <= i <= n_edges]
+        dropped = sorted(set(op["edges"]) - set(ids))
+        if dropped:
+            _note(f"'{op['name']}': dropped out-of-range edge index(es) "
+                  f"{dropped} ('{op['target']}' has {n_edges} edges).")
+        if ids:
+            return ids
+        _note(f"'{op['name']}': none of the requested edges exist; "
+              "applying to all modifiable edges instead.")
+
+    ids = _modifiable_edge_ids(shape)
+    if not ids:
+        raise InterpreterError(
+            f"'{op['target']}' has no edges that can be filleted/chamfered."
+        )
+    return ids
+
+
+def _edge_feature(op, doc, objects, type_id, value_key):
+    """Build a Part::Fillet/Chamfer, shrinking the value until OCC accepts it.
+
+    OCC rejects a radius/size larger than the local geometry allows by leaving
+    a null shape at recompute. Rather than failing the whole build, retry with
+    a progressively halved value; only give up when even a tiny value fails.
+    """
+    target = objects[op["target"]]
+    ids = _edge_ids(op, target)
+    requested = float(op[value_key])
+    kind = type_id.split("::")[-1].lower()
+
+    obj = doc.addObject(type_id, op["name"])
+    obj.Base = target
+    value = requested
+    for _ in range(4):
+        obj.Edges = [(i, value, value) for i in ids]
+        doc.recompute()
+        shape = getattr(obj, "Shape", None)
+        if shape is not None and not shape.isNull():
+            if value != requested:
+                _note(f"'{op['name']}': {value_key} {requested:g} was too large "
+                      f"for the geometry; used {value:g} instead.")
+            _hide(target)
+            return obj
+        value = round(value / 2.0, 6)
+    raise InterpreterError(
+        f"'{op['name']}' failed even at {value_key} {value * 2:g} - the edges "
+        f"of '{op['target']}' cannot take this {kind}. Use fewer/other edges "
+        "or a smaller value."
+    )
 
 
 def _fillet(op, doc, objects):
-    target = objects[op["target"]]
-    edges = _edge_list(op, target, ("radius",))
-    obj = doc.addObject("Part::Fillet", op["name"])
-    obj.Base = target
-    obj.Edges = edges
-    _hide(target)
-    return obj
+    return _edge_feature(op, doc, objects, "Part::Fillet", "radius")
 
 
 def _chamfer(op, doc, objects):
-    target = objects[op["target"]]
-    edges = _edge_list(op, target, ("size",))
-    obj = doc.addObject("Part::Chamfer", op["name"])
-    obj.Base = target
-    obj.Edges = edges
-    _hide(target)
-    return obj
+    return _edge_feature(op, doc, objects, "Part::Chamfer", "size")
 
 
 def _translate(op, _doc, objects):

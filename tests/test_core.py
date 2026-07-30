@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from gpt4freecad.cad import schema, prompts, templates
 from gpt4freecad.cad import inspect as ginspect
 from gpt4freecad.config import Config, _JsonBackend
-from gpt4freecad import engine, util
+from gpt4freecad import engine, harness, util
 from gpt4freecad.llm import (
     all_providers, get_provider, extract_json, ChatRequest, LLMError,
 )
@@ -745,6 +745,135 @@ def test_user_templates_missing_dir_is_empty():
         assert loaded == [] and problems == []
     finally:
         del os.environ["GPT4FREECAD_TEMPLATES"]
+
+
+# --------------------------------------------------------------------------- #
+# harness (auto-repair bookkeeping)
+# --------------------------------------------------------------------------- #
+def test_harness_budget_and_reset():
+    s = harness.RepairSession(2)
+    assert s.can_retry() and s.attempts == 0
+    s.start_attempt()
+    assert s.can_retry() and s.round_label == "1/2"
+    s.start_attempt()
+    assert not s.can_retry()
+    s.reset(3)
+    assert s.attempts == 0 and s.budget == 3 and s.can_retry()
+    s.reset(0)
+    assert not s.can_retry()  # 0 disables auto-repair entirely
+
+
+def test_harness_repeat_detection():
+    s = harness.RepairSession()
+    ops = [{"op": "box", "name": "b", "length": 1, "width": 1, "height": 1}]
+    assert not s.seen_failure(ops)
+    s.note_failure(ops)
+    # Same content, different object / key order -> still a repeat.
+    same = [dict(reversed(list(ops[0].items())))]
+    assert s.seen_failure(same)
+    assert not s.seen_failure([{"op": "sphere", "name": "s", "radius": 2}])
+    # Code payloads fingerprint too (whitespace-insensitive at the ends).
+    s.note_failure("doc.recompute()\n")
+    assert s.seen_failure("  doc.recompute()")
+    s.reset()
+    assert not s.seen_failure(ops)
+
+
+# --------------------------------------------------------------------------- #
+# HTTP retry policy
+# --------------------------------------------------------------------------- #
+def _patch_post(flaky):
+    """Swap base._post_once + time for the duration of one test."""
+    import types
+    from gpt4freecad.llm import base as base_mod
+    sleeps = []
+    originals = (base_mod._post_once, base_mod.time)
+    base_mod._post_once = flaky
+    base_mod.time = types.SimpleNamespace(sleep=sleeps.append)
+    return base_mod, originals, sleeps
+
+
+def test_http_retries_transient_then_succeeds():
+    calls = {"n": 0}
+
+    def flaky(url, body, headers, timeout):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            err = LLMError("HTTP 503: overloaded")
+            err.transient = True
+            raise err
+        return {"ok": True}
+
+    base_mod, originals, sleeps = _patch_post(flaky)
+    try:
+        out = base_mod.http_post_json("https://x", {})
+        assert out == {"ok": True}
+        assert calls["n"] == 3 and len(sleeps) == 2
+    finally:
+        base_mod._post_once, base_mod.time = originals
+
+
+def test_http_gives_up_after_budget_and_skips_auth():
+    def always_503(url, body, headers, timeout):
+        err = LLMError("HTTP 503")
+        err.transient = True
+        raise err
+
+    base_mod, originals, sleeps = _patch_post(always_503)
+    try:
+        expect_error(lambda: base_mod.http_post_json("https://x", {}), LLMError)
+        assert len(sleeps) == 2  # retried, then gave up
+    finally:
+        base_mod._post_once, base_mod.time = originals
+
+    calls = {"n": 0}
+
+    def auth_fail(url, body, headers, timeout):
+        calls["n"] += 1
+        raise base_mod.AuthError("HTTP 401")
+
+    base_mod, originals, sleeps = _patch_post(auth_fail)
+    try:
+        expect_error(lambda: base_mod.http_post_json("https://x", {}),
+                     base_mod.AuthError)
+        assert calls["n"] == 1 and sleeps == []  # never retried
+    finally:
+        base_mod._post_once, base_mod.time = originals
+
+
+# --------------------------------------------------------------------------- #
+# repair prompts + config budget
+# --------------------------------------------------------------------------- #
+def test_python_repair_prompt():
+    p = prompts.python_repair_prompt("NameError: box\n  at line 3: box.foo()")
+    assert "NameError" in p and "line 3" in p and "```python```" in p
+
+
+def test_step_repair_prompt():
+    failed = [{"op": "fillet", "name": "f", "target": "ghost", "radius": 2}]
+    p = prompts.step_repair_prompt("round the top", failed, "references undefined 'ghost'")
+    assert "round the top" in p
+    assert '"ghost"' in p          # the failed ops are echoed back as JSON
+    assert "references undefined" in p
+    assert "APPEND" in p
+
+
+def test_config_repair_rounds():
+    path = os.path.join(tempfile.gettempdir(), "gpt4freecad-test-repair.json")
+    if os.path.exists(path):
+        os.remove(path)
+    cfg = Config(_JsonBackend(path))
+    try:
+        assert cfg.repair_rounds() == 3  # default
+        cfg.set_repair_rounds(5)
+        assert cfg.repair_rounds() == 5
+        cfg.set_repair_rounds(99)
+        assert cfg.repair_rounds() == 10  # clamped
+        cfg.set_repair_rounds(-4)
+        assert cfg.repair_rounds() == 0
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 # --------------------------------------------------------------------------- #

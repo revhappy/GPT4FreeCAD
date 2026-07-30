@@ -9,6 +9,7 @@ an undo transaction. Imports FreeCAD; not used by the unit tests.
 from __future__ import annotations
 
 import math
+import traceback
 from typing import List, Tuple
 
 import FreeCAD as App
@@ -75,6 +76,26 @@ def run_python_code(text_or_code: str, doc=None, prechecked: bool = False) -> Tu
         doc.commitTransaction()
     except Exception as exc:  # noqa: BLE001
         doc.abortTransaction()
-        raise PythonRunError(str(exc)) from exc
+        raise PythonRunError(_describe_error(exc, code)) from exc
 
     return [f"Executed {len(code.splitlines())} lines of Python."], code
+
+
+def _describe_error(exc: BaseException, code: str) -> str:
+    """Error message pinned to the failing line of the generated script.
+
+    'NameError: x is not defined' alone is useless for auto-repair; with the
+    line number and source line the model can fix the exact spot.
+    """
+    lineno = None
+    if isinstance(exc, SyntaxError) and exc.filename == "<gpt4freecad>":
+        lineno = exc.lineno
+    else:
+        for frame in traceback.extract_tb(exc.__traceback__):
+            if frame.filename == "<gpt4freecad>":
+                lineno = frame.lineno  # innermost generated-code frame wins
+    message = f"{type(exc).__name__}: {exc}"
+    lines = code.splitlines()
+    if lineno and 1 <= lineno <= len(lines):
+        message += f"\n  at line {lineno}: {lines[lineno - 1].strip()}"
+    return message
