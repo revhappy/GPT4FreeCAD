@@ -44,8 +44,8 @@ Generate **parametric** FreeCAD geometry from plain English — powered by your 
 >   own hardware through the [Machine Activation SDK](https://github.com/revhappy/MachineActivationSDK)
 >   — offline, free per-part, and nothing you design ever leaves the computer. Structured mode
 >   gets a guarantee no cloud provider offers: the CAD schema is compiled to a **GBNF grammar
->   and enforced inside llama.cpp's sampler**, so a small local model *cannot* emit a malformed
->   program. [Set it up ↓](#local-models-no-api-key-no-cloud)
+>   and enforced inside llama.cpp's sampler**, so every operation the model emits is
+>   structurally valid by construction. [Set it up ↓](#local-models-no-api-key-no-cloud)
 > - **Auto-repair harness** — failed generations, failed builds and defective geometry are
 >   diagnosed and retried automatically for a configurable number of rounds (default 3, was a
 >   single attempt), with a loop guard that stops if the model repeats a plan that already
@@ -152,9 +152,16 @@ Then in FreeCAD: **⚙ Settings → Local (Machine Activation)**, confirm the se
 which acceleration it got (CPU/GPU/NPU), and anything degraded. That is the difference
 between "the AI is slow" and "you are running a 7B model on CPU".
 
-**Structured mode gets a hard guarantee locally.** The CAD program schema is compiled to a
-GBNF grammar and enforced inside llama.cpp's sampler, so a small local model *cannot* emit a
-malformed program. Asking a 4B model nicely for JSON fails constantly; this cannot fail.
+**Structured mode gets a hard guarantee locally.** The CAD program schema — one branch per
+operation, carrying that operation's required fields and types — is compiled to a GBNF grammar
+and enforced inside llama.cpp's sampler. A `box` without its dimensions, a bad enum, a
+malformed vector: the model is *unable* to produce them. Asking a 4B model nicely for JSON
+fails constantly; this cannot.
+
+The grammar guarantees each operation's shape. Cross-operation rules — references resolving to
+objects defined earlier, unique names, positive dimensions — stay with the validator, backed by
+the auto-repair harness above. Verified on `gemma-4-E4B-it` (IQ4_NL, CPU): plate-with-a-hole
+and filleted-cube both produced valid programs on the first attempt, no repair round needed.
 
 Optionally `pip install machine-activation` (dependency-free, stdlib only) for the full
 activation report. Without it GPT4FreeCAD speaks the same HTTP directly, so the provider

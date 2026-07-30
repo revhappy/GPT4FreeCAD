@@ -12,11 +12,15 @@ Run it on your own machine, and stop hand-holding failed builds.
   design leaves the computer. Start a server with
   `machine serve <model.gguf>`, then point Settings at it (default
   `http://127.0.0.1:8177`).
-  - **Structured output cannot be malformed.** The CAD program schema
+  - **Structured output is grammar-enforced.** The CAD program schema
     (`schema.json_schema()`, previously unused) is compiled to a GBNF grammar
-    and enforced inside llama.cpp's sampler. Asking a 4B model nicely for JSON
-    fails constantly; this cannot fail — which is what makes small local models
-    usable for CAD at all.
+    and enforced inside llama.cpp's sampler, so every operation is structurally
+    valid by construction. Asking a 4B model nicely for JSON fails constantly;
+    this cannot — which is what makes small local models usable for CAD at all.
+    Cross-operation rules (references, unique names, positive dimensions) remain
+    the validator's job, backed by auto-repair.
+  - Verified end to end on `gemma-4-E4B-it` (IQ4_NL, CPU): a plate-with-a-hole
+    and a filleted cube each produced a valid program on the first attempt.
   - **Test connection reports the activation contract** — whether the model
     actually fits this machine, which acceleration it got (CPU/GPU/NPU), and
     what is degraded. No cloud API has an equivalent.
@@ -40,7 +44,15 @@ Run it on your own machine, and stop hand-holding failed builds.
     "Rebuild failed - edit the step".
 - Transient provider failures (429 / 5xx / network) are retried with backoff, so
   a rate-limit blip no longer kills a generation mid-repair.
-- 13 new unit tests (78 total).
+- 14 new unit tests (79 total).
+
+### Fixed (local models)
+- **`json_schema()` now carries each operation's required fields.** It only
+  constrained `op` itself, so a grammar built from it permitted `{"op": "box"}`
+  with no name or dimensions — accepted by the sampler, then rejected by
+  `validate_program`. Caught by running a real local model. The schema is now
+  generated per-operation from `OPERATIONS` (required fields, types, enums), so
+  the grammar enforces what the validator checks and the two cannot drift.
 
 ### Changed
 - **Build errors name the operation that failed** and list what had already been
