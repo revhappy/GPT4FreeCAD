@@ -88,7 +88,8 @@ def _generate_structured(
 
     raw = provider.chat(
         ChatRequest(messages=messages, model=model, temperature=temperature,
-                    max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level),
+                    max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level,
+                    json_schema=schema.json_schema()),
         api_key,
     )
 
@@ -103,7 +104,8 @@ def _generate_structured(
         ]
         raw2 = provider.chat(
             ChatRequest(messages=repair_messages, model=model, temperature=temperature,
-                        max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level),
+                        max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level,
+                        json_schema=schema.json_schema()),
             api_key,
         )
         program = schema.validate_program(extract_json(raw2))  # may raise; let it
@@ -144,7 +146,8 @@ def generate_step(
     ]
     raw = provider.chat(
         ChatRequest(messages=messages, model=model, temperature=temperature,
-                    max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level),
+                    max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level,
+                    json_schema=_step_schema()),
         api_key,
     )
     try:
@@ -157,13 +160,23 @@ def generate_step(
         ]
         raw2 = provider.chat(
             ChatRequest(messages=repair_messages, model=model, temperature=temperature,
-                        max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level),
+                        max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level,
+                        json_schema=_step_schema()),
             api_key,
         )
         new_ops = _extract_new_ops(raw2, program)
         return GenerationResult(
             mode="engineering", raw=raw2, program=new_ops, repaired=True, messages=messages
         )
+
+
+def _step_schema() -> Dict[str, Any]:
+    """Schema for a step reply - the same ``{"operations": [...]}`` envelope.
+
+    A step returns only the ops to append, but the envelope is identical, so
+    grammar-constrained local models get the same guarantee here.
+    """
+    return schema.json_schema()
 
 
 def _extract_new_ops(raw: str, program: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

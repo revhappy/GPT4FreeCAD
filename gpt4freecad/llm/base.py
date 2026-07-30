@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 # --------------------------------------------------------------------------- #
@@ -52,6 +52,10 @@ class ChatRequest:
     # Gemini 3 only: "minimal" | "low" | "medium" | "high". Anything else (incl.
     # None / "default") means "let the model decide". Ignored by other providers.
     thinking_level: Optional[str] = None
+    # Optional JSON schema for the expected reply, used with json_mode. Local
+    # models enforce it as a grammar (so malformed output is impossible); cloud
+    # providers that have no equivalent simply ignore it.
+    json_schema: Optional[Dict[str, Any]] = None
 
     def split_system(self) -> "tuple[str, List[Dict[str, str]]]":
         """Return ``(system_text, non_system_messages)``.

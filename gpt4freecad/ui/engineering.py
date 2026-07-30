@@ -132,7 +132,7 @@ class EngineeringWidget(QtWidgets.QWidget):
             self.host._set_status("Describe the next step first.", error=True)
             return
         ctx = self.host._gen_context()
-        if not ctx["api_key"]:
+        if ctx["provider"].requires_key and not ctx["api_key"]:
             self.host._log_error(f"No API key for {ctx['provider'].label}. Open Settings (⚙).")
             return
         self.host._log_user(desc)

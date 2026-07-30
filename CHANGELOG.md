@@ -1,5 +1,64 @@
 # GPT4FreeCAD Changelog
 
+## [2.4.0] - 2026-07-29
+
+Run it on your own machine, and stop hand-holding failed builds.
+
+### Added
+- **Local models — a fourth provider, no API key and no cloud.** *Local (Machine
+  Activation)* runs a GGUF model on your own hardware via the
+  [Machine Activation SDK](https://github.com/revhappy/MachineActivationSDK)
+  (MIT, `llama.cpp` under the hood). Offline, free per part, and nothing you
+  design leaves the computer. Start a server with
+  `machine serve <model.gguf>`, then point Settings at it (default
+  `http://127.0.0.1:8177`).
+  - **Structured output cannot be malformed.** The CAD program schema
+    (`schema.json_schema()`, previously unused) is compiled to a GBNF grammar
+    and enforced inside llama.cpp's sampler. Asking a 4B model nicely for JSON
+    fails constantly; this cannot fail — which is what makes small local models
+    usable for CAD at all.
+  - **Test connection reports the activation contract** — whether the model
+    actually fits this machine, which acceleration it got (CPU/GPU/NPU), and
+    what is degraded. No cloud API has an equivalent.
+  - Works with or without `pip install machine-activation`: the SDK's
+    dependency-free Python client is used when importable (it also supplies the
+    activation report), otherwise the same HTTP is spoken with the standard
+    library, so the provider works in FreeCAD's bundled Python.
+  - Local traffic bypasses the system proxy — otherwise `urllib` routes
+    `127.0.0.1` through `$http_proxy`, which breaks on a corporate machine and
+    would send prompts through a host you never chose.
+- **Auto-repair harness** (`harness.py`) — a repair budget per user action,
+  configurable in Settings (**Auto-repair rounds**, default 3, `0` disables).
+  Previously every failure path was capped at a single attempt.
+  - A **loop guard** fingerprints plans that already failed and stops the loop
+    when the model returns the same broken program instead of spending the rest
+    of the budget on it.
+  - **Python mode is now repaired too** (it previously got no retry at all),
+    with the traceback pinned to the failing line of the generated script.
+  - **Engineering timeline steps are repaired** — a step that fails to build is
+    rolled back and retried with the error, instead of only logging
+    "Rebuild failed - edit the step".
+- Transient provider failures (429 / 5xx / network) are retried with backoff, so
+  a rate-limit blip no longer kills a generation mid-repair.
+- 13 new unit tests (78 total).
+
+### Changed
+- **Build errors name the operation that failed** and list what had already been
+  built — `operation #4 'fillet' ('rounded') failed: … [objects built so far:
+  'base', 'boss']` — rather than a bare OpenCascade message. Far more of these
+  are fixed on the first retry.
+- `Provider.requires_key` is now honoured: keyless providers no longer trip the
+  "No API key" gate, and Settings shows a server URL instead of a key field.
+
+### Fixed
+- **Oversized fillets/chamfers no longer fail the build.** The value is halved
+  until the geometry kernel accepts it (logged when it happens), and
+  out-of-range edge indices are dropped instead of aborting — deterministic
+  fixes that cost milliseconds rather than an LLM round-trip.
+- **A boolean that removes no material is now caught.** A `cut` or `hole` whose
+  tool misses its target used to "succeed" and leave the part untouched; a
+  volume comparison now reports it and feeds it into auto-repair.
+
 ## [2.3.1] - 2026-07-29
 
 Fixes found by dogfooding the engineering timeline with Claude as the model.

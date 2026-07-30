@@ -6,6 +6,7 @@ Run with either::
     pytest tests/test_core.py
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -23,6 +24,7 @@ from gpt4freecad.llm import (
 from gpt4freecad.llm import openai as openai_mod
 from gpt4freecad.llm import anthropic as anthropic_mod
 from gpt4freecad.llm import gemini as gemini_mod
+from gpt4freecad.llm import local as local_mod
 
 
 def expect_error(fn, exc=Exception):
@@ -745,6 +747,127 @@ def test_user_templates_missing_dir_is_empty():
         assert loaded == [] and problems == []
     finally:
         del os.environ["GPT4FREECAD_TEMPLATES"]
+
+
+# --------------------------------------------------------------------------- #
+# local provider (Machine Activation SDK)
+# --------------------------------------------------------------------------- #
+def _patch_local(captured, response):
+    """Replace local._post_json / _sdk_client so no server is needed."""
+    def fake_post(url, payload, timeout):
+        captured["url"] = url
+        captured["payload"] = payload
+        captured["timeout"] = timeout
+        return response
+
+    originals = (local_mod._post_json, local_mod._sdk_client)
+    local_mod._post_json = fake_post
+    local_mod._sdk_client = lambda base_url, timeout: None  # force HTTP fallback
+    return originals
+
+
+def _restore_local(originals):
+    local_mod._post_json, local_mod._sdk_client = originals
+
+
+def test_local_provider_is_registered_and_keyless():
+    provider = get_provider("machine")
+    assert provider.id == "machine"
+    assert provider.requires_key is False
+    # Keyless providers must still be listed for the panel's provider combo.
+    assert "machine" in {p.id for p in all_providers()}
+
+
+def test_local_chat_via_http_fallback():
+    captured = {}
+    originals = _patch_local(
+        captured, {"choices": [{"message": {"content": "ok"}}]})
+    try:
+        provider = get_provider("machine")
+        provider.base_url = "http://127.0.0.1:9999"
+        req = ChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="local-model", max_tokens=256, temperature=0.3,
+        )
+        out = provider.chat(req, "")  # no API key needed
+        assert out == "ok"
+        assert captured["url"] == "http://127.0.0.1:9999/v1/chat/completions"
+        assert captured["payload"]["messages"][0]["content"] == "hi"
+        assert captured["payload"]["max_tokens"] == 256
+        assert "response_format" not in captured["payload"]  # json_mode off
+        assert captured["timeout"] >= 600  # local decode is slow; no short timeout
+    finally:
+        _restore_local(originals)
+        get_provider("machine").base_url = local_mod.DEFAULT_BASE_URL
+
+
+def test_local_json_mode_sends_grammar_schema():
+    captured = {}
+    originals = _patch_local(
+        captured, {"choices": [{"message": {"content": '{"operations": []}'}}]})
+    try:
+        req = ChatRequest(
+            messages=[{"role": "user", "content": "a plate"}],
+            model="local-model", json_mode=True, json_schema=schema.json_schema(),
+        )
+        get_provider("machine").chat(req, "")
+        fmt = captured["payload"]["response_format"]
+        assert fmt["type"] == "json_schema"
+        # The CAD program schema is what gets compiled to a GBNF grammar.
+        sent = fmt["json_schema"]["schema"]
+        assert sent["required"] == ["operations"]
+        assert "box" in sent["properties"]["operations"]["items"]["properties"]["op"]["enum"]
+    finally:
+        _restore_local(originals)
+
+
+def test_local_empty_reply_and_missing_server_are_clear():
+    captured = {}
+    originals = _patch_local(captured, {"choices": []})
+    try:
+        req = ChatRequest(messages=[{"role": "user", "content": "hi"}], model="m")
+        expect_error(lambda: get_provider("machine").chat(req, ""), LLMError)
+    finally:
+        _restore_local(originals)
+
+    # A down server must say how to start one, not just surface a socket error.
+    hint = local_mod._not_running_hint("http://127.0.0.1:8177", OSError("refused"))
+    assert "machine serve" in hint and "127.0.0.1:8177" in hint
+
+
+def test_local_engine_structured_passes_schema_to_provider():
+    """Structured generation must hand the provider a schema to constrain on."""
+    seen = {}
+
+    class Recorder:
+        label = "rec"
+
+        def chat(self, request, api_key):
+            seen["schema"] = request.json_schema
+            seen["json_mode"] = request.json_mode
+            return json.dumps(schema.example_program())
+
+    result = engine.generate(
+        Recorder(), "k", "m", "a plate", mode="structured")
+    assert result.program is not None
+    assert seen["json_mode"] is True
+    assert seen["schema"]["required"] == ["operations"]
+
+
+def test_config_machine_base_url():
+    path = os.path.join(tempfile.gettempdir(), "gpt4freecad-test-machine.json")
+    if os.path.exists(path):
+        os.remove(path)
+    cfg = Config(_JsonBackend(path))
+    try:
+        assert cfg.machine_base_url() == "http://127.0.0.1:8177"
+        cfg.set_machine_base_url("http://localhost:9000 ")
+        assert cfg.machine_base_url() == "http://localhost:9000"
+        cfg.set_machine_base_url("")  # blank falls back to the default
+        assert cfg.machine_base_url() == "http://127.0.0.1:8177"
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 # --------------------------------------------------------------------------- #

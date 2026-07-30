@@ -54,23 +54,40 @@ class SettingsDialog(QtWidgets.QDialog):
         box = QtWidgets.QGroupBox(provider.label)
         form = QtWidgets.QFormLayout(box)
 
-        key_edit = QtWidgets.QLineEdit(self.cfg.api_key(provider.id))
-        key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        key_edit.setPlaceholderText("Paste API key")
-        self._key_edits[provider.id] = key_edit
+        if provider.requires_key:
+            key_edit = QtWidgets.QLineEdit(self.cfg.api_key(provider.id))
+            key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+            key_edit.setPlaceholderText("Paste API key")
+            self._key_edits[provider.id] = key_edit
 
-        show = QtWidgets.QCheckBox("Show")
-        show.toggled.connect(
-            lambda on, e=key_edit: e.setEchoMode(
-                QtWidgets.QLineEdit.Normal if on else QtWidgets.QLineEdit.Password
+            show = QtWidgets.QCheckBox("Show")
+            show.toggled.connect(
+                lambda on, e=key_edit: e.setEchoMode(
+                    QtWidgets.QLineEdit.Normal if on else QtWidgets.QLineEdit.Password
+                )
             )
-        )
-        key_row = QtWidgets.QHBoxLayout()
-        key_row.addWidget(key_edit, 1)
-        key_row.addWidget(show)
-        key_wrap = QtWidgets.QWidget()
-        key_wrap.setLayout(key_row)
-        form.addRow("API key:", key_wrap)
+            key_row = QtWidgets.QHBoxLayout()
+            key_row.addWidget(key_edit, 1)
+            key_row.addWidget(show)
+            key_wrap = QtWidgets.QWidget()
+            key_wrap.setLayout(key_row)
+            form.addRow("API key:", key_wrap)
+        else:
+            note = QtWidgets.QLabel(
+                "Runs on this machine - no API key, no cloud, works offline. "
+                "Start a server with <code>machine serve &lt;model.gguf&gt;</code>, "
+                "then press Test connection."
+            )
+            note.setWordWrap(True)
+            form.addRow("", note)
+
+        if provider.id == "machine":
+            self._machine_url = QtWidgets.QLineEdit(self.cfg.machine_base_url())
+            self._machine_url.setToolTip(
+                "Base URL of the local Machine Activation server "
+                "(default http://127.0.0.1:8177)."
+            )
+            form.addRow("Server URL:", self._machine_url)
 
         model_combo = QtWidgets.QComboBox()
         model_combo.setEditable(True)
@@ -89,7 +106,9 @@ class SettingsDialog(QtWidgets.QDialog):
             form.addRow("Endpoint:", endpoint)
 
         bottom = QtWidgets.QHBoxLayout()
-        get_key = QtWidgets.QLabel(f'<a href="{provider.api_key_url}">Get an API key</a>')
+        link_text = ("Get an API key" if provider.requires_key
+                     else "Machine Activation SDK")
+        get_key = QtWidgets.QLabel(f'<a href="{provider.api_key_url}">{link_text}</a>')
         get_key.setOpenExternalLinks(True)
         bottom.addWidget(get_key)
         bottom.addStretch(1)
@@ -176,6 +195,9 @@ class SettingsDialog(QtWidgets.QDialog):
 
     # ------------------------------------------------------------------ #
     def _test(self, provider):
+        if not provider.requires_key:
+            self._test_local(provider)
+            return
         key = self._key_edits[provider.id].text().strip()
         model = self._model_combos[provider.id].currentText().strip()
         if not key:
@@ -205,7 +227,31 @@ class SettingsDialog(QtWidgets.QDialog):
             QtWidgets.QApplication.restoreOverrideCursor()
             QtWidgets.QMessageBox.critical(self, "Test failed", str(exc))
 
+    def _test_local(self, provider):
+        """Report the activation contract: does this model fit, on what hardware.
+
+        A chat round-trip would also work but can take a minute while a local
+        model loads; the activation report answers the useful question instantly.
+        """
+        if hasattr(self, "_machine_url"):
+            provider.base_url = self._machine_url.text().strip() or provider.base_url
+        QtWidgets.QApplication.setOverrideCursor(QtGui.QCursor(QtCore.Qt.WaitCursor))
+        try:
+            summary = provider.activation_summary()
+        except Exception as exc:  # noqa: BLE001
+            summary = str(exc)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        models = provider.list_models()
+        if models:
+            summary += f"\n\nLoaded model(s): {', '.join(models)}"
+            QtWidgets.QMessageBox.information(self, "Local model", summary)
+        else:
+            QtWidgets.QMessageBox.warning(self, "Local model", summary)
+
     def _save(self):
+        if hasattr(self, "_machine_url"):
+            self.cfg.set_machine_base_url(self._machine_url.text())
         for pid, edit in self._key_edits.items():
             self.cfg.set_api_key(pid, edit.text())
         for pid, combo in self._model_combos.items():
