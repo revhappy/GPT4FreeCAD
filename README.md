@@ -55,6 +55,19 @@ Generate **parametric** FreeCAD geometry from plain English — powered by your 
 > - **Deterministic fixes, no round-trip** — an oversized fillet/chamfer shrinks until the
 >   geometry kernel accepts it and out-of-range edge indices are dropped, in milliseconds,
 >   before any request is spent.
+>
+> **New in 2.4.1 — a lathe, and a hardening pass:**
+> - **`revolve`** — spin a closed `[r, z]` profile around the Z axis. The IR's biggest
+>   expressiveness gap: flanges, shafts, pulleys, bottles and vases stop needing a stack of
+>   boolean primitives to approximate.
+> - **Reasoning-model support across all three cloud providers** — thinking output shares the
+>   token budget with the reply, so Claude 5 and GPT-5 requests now get a budget floor and a
+>   longer timeout instead of arriving truncated or empty. GPT-5/o-series also take
+>   `max_completion_tokens` and reject `temperature`; the adapter honours that.
+> - **The Python-mode safety net is no longer bypassed on auto-run** — the deny-list is
+>   skipped only when *you* press Build on code you can see.
+> - **The local model now unloads with FreeCAD** (and on demand, from Settings), instead of
+>   leaving a multi-gigabyte server resident after the app closes.
 
 ---
 
@@ -108,6 +121,7 @@ Because every object is a native FreeCAD parametric feature (`Part::Box`, `Part:
 |---|---|
 | `box`, `cylinder`, `sphere`, `cone`, `torus` | primitives |
 | `extrude` | extrude a closed 2D polygon profile along +Z |
+| `revolve` | revolve a closed `[r, z]` profile around the Z axis (lathe: flanges, shafts, pulleys, vases) |
 | `cut`, `fuse`, `common` | boolean difference / union / intersection |
 | `fillet`, `chamfer` | round / bevel edges (all edges, or by index) |
 | `linear_pattern`, `polar_pattern` | replicate a feature in a grid / around an axis |

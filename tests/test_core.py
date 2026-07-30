@@ -183,6 +183,24 @@ def test_openai_request():
     assert captured["payload"]["model"] == "gpt-4o"
     assert captured["payload"]["response_format"] == {"type": "json_object"}
     assert captured["payload"]["max_tokens"] == 100
+    assert captured["payload"]["temperature"] == 0.1
+
+
+def test_openai_reasoning_model_request():
+    """gpt-5.x / o-series: max_completion_tokens, no temperature, budget floor."""
+    captured = _patch(openai_mod, {"choices": [{"message": {"content": "ok"}}]})
+    req = ChatRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        model="gpt-5.1", json_mode=True, max_tokens=4096, temperature=0.2,
+    )
+    out = get_provider("openai").chat(req, "sk-test")
+    assert out == "ok"
+    payload = captured["payload"]
+    assert "max_tokens" not in payload            # rejected by reasoning models
+    assert "temperature" not in payload           # likewise
+    assert payload["max_completion_tokens"] >= 16384  # reasoning shares the budget
+    # Current defaults lead with the reasoning family.
+    assert get_provider("openai").default_model.startswith("gpt-5")
 
 
 def test_gemini_request():
@@ -309,6 +327,17 @@ def test_anthropic_claude5_request():
     assert "temperature" not in captured["payload"]  # rejected on Claude 5
     assert captured["payload"]["fallbacks"] == "default"
     assert captured["headers"]["anthropic-beta"]
+    # Thinking-by-default models spend thinking from max_tokens; a small cap
+    # truncates the answer before any text, so the adapter applies a floor.
+    assert captured["payload"]["max_tokens"] >= 16384
+
+
+def test_anthropic_non_thinking_model_keeps_its_cap():
+    captured = _patch(anthropic_mod, {"content": [{"type": "text", "text": "ok"}]})
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}],
+                      model="claude-sonnet-4-6", max_tokens=100)
+    get_provider("anthropic").chat(req, "ant-key")
+    assert captured["payload"]["max_tokens"] == 100  # no floor needed
 
 
 def test_anthropic_refusal():
@@ -358,8 +387,14 @@ def test_engine_structured_repair():
 def test_engine_structured_repair_fails():
     bad = '{"operations": [{"op": "box", "name": "b"}]}'
     p = _FakeProvider([bad, bad])
-    expect_error(lambda: engine.generate(p, "k", "fake-1", "x", mode="structured"),
-                 schema.SchemaError)
+    try:
+        engine.generate(p, "k", "fake-1", "x", mode="structured")
+    except schema.SchemaError as exc:
+        # The reply is attached so the panel's repair rounds can echo it back -
+        # a reply that never validated is not in the conversation history.
+        assert exc.raw_reply == bad
+    else:
+        raise AssertionError("expected SchemaError")
 
 
 def test_engine_python_mode():
@@ -505,9 +540,32 @@ def _schema_branches():
 def test_new_ops_in_reference_and_schema():
     ref = schema.operations_reference()
     branches = _schema_branches()
-    for op in ("linear_pattern", "polar_pattern", "mirror", "shell", "hole"):
+    for op in ("linear_pattern", "polar_pattern", "mirror", "shell", "hole",
+               "revolve"):
         assert op in ref
         assert op in branches
+
+
+def test_schema_revolve():
+    # A pulley-ish closed [r, z] profile revolved fully, then cut like any solid.
+    schema.validate_program({"operations": [
+        {"op": "revolve", "name": "pulley",
+         "profile": [[5, 0], [20, 0], [20, 4], [12, 6], [12, 14], [20, 16],
+                     [20, 20], [5, 20]]},
+        {"op": "cylinder", "name": "keyway", "radius": 2, "height": 25},
+        {"op": "cut", "name": "finished", "base": "pulley", "tool": "keyway"},
+    ]})
+    # Partial revolve via 'angle'; zero/negative angles are rejected.
+    schema.validate_program({"operations": [
+        {"op": "revolve", "name": "half", "angle": 180,
+         "profile": [[0, 0], [5, 0], [5, 5]]}]})
+    expect_error(lambda: schema.validate_program({"operations": [
+        {"op": "revolve", "name": "r", "angle": 0,
+         "profile": [[0, 0], [5, 0], [5, 5]]}]}), schema.SchemaError)
+    # A profile needs at least 3 [r, z] points, like extrude.
+    expect_error(lambda: schema.validate_program({"operations": [
+        {"op": "revolve", "name": "r", "profile": [[0, 0], [5, 0]]}]}),
+        schema.SchemaError)
 
 
 def test_json_schema_carries_each_ops_required_fields():
@@ -695,11 +753,23 @@ def test_config_roundtrip():
 
 
 def test_prompts_build():
-    sp = prompts.structured_system_prompt("inch")
+    sp = prompts.system_prompt("inch")
     assert "inch" in sp
     assert "box(" in sp
     assert prompts.repair_prompt("oops").startswith("The previous")
     assert "FreeCAD" in prompts.PYTHON_SYSTEM_PROMPT
+
+
+def test_repair_prompt_echoes_the_failed_reply():
+    """A reply that never validated is not in the history - echo it back."""
+    p = prompts.repair_prompt("field 'radius' must be a number",
+                              failed_reply='{"operations": [{"op": "sphere"}]}')
+    assert '"sphere"' in p
+    assert "radius" in p
+    # Without a reply the prompt must not carry an empty echo section.
+    assert "previous reply" not in prompts.repair_prompt("oops")
+    # Huge replies are truncated, not sent whole.
+    assert len(prompts.repair_prompt("e", failed_reply="x" * 100000)) < 10000
 
 
 # --------------------------------------------------------------------------- #

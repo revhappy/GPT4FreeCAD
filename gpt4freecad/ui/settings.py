@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from .qt import QtCore, QtGui, QtWidgets, exec_dialog
+from .worker import LLMWorker
 from ..config import get_config
 from ..llm import all_providers, get_provider, ChatRequest
 from ..llm.base import LLMError
@@ -103,7 +104,17 @@ class SettingsDialog(QtWidgets.QDialog):
             self._machine_status = QtWidgets.QLabel()
             self._machine_status.setWordWrap(True)
             self._machine_status.setStyleSheet("color: gray;")
-            form.addRow("", self._machine_status)
+            self._machine_unload = QtWidgets.QPushButton("Unload")
+            self._machine_unload.setToolTip(
+                "Stop the local model server and free its memory. It reloads "
+                "automatically on the next Generate.")
+            self._machine_unload.clicked.connect(self._unload_model)
+            status_row = QtWidgets.QHBoxLayout()
+            status_row.addWidget(self._machine_status, 1)
+            status_row.addWidget(self._machine_unload)
+            status_wrap = QtWidgets.QWidget()
+            status_wrap.setLayout(status_row)
+            form.addRow("", status_wrap)
             self._refresh_machine_status()
 
             # Plumbing almost nobody should touch: only relevant when attaching
@@ -120,12 +131,15 @@ class SettingsDialog(QtWidgets.QDialog):
             advanced_form.addRow("Server URL:", self._machine_url)
             form.addRow("", advanced)
 
-        model_combo = QtWidgets.QComboBox()
-        model_combo.setEditable(True)
-        model_combo.addItems(provider.default_models)
-        model_combo.setCurrentText(self.cfg.model(provider.id, provider.default_model))
-        self._model_combos[provider.id] = model_combo
-        form.addRow("Model:", model_combo)
+        if provider.id != "machine":
+            # The local provider's "model" is the .gguf picked above; a second
+            # (empty) catalogue combo would only sit there confusing people.
+            model_combo = QtWidgets.QComboBox()
+            model_combo.setEditable(True)
+            model_combo.addItems(provider.default_models)
+            model_combo.setCurrentText(self.cfg.model(provider.id, provider.default_model))
+            self._model_combos[provider.id] = model_combo
+            form.addRow("Model:", model_combo)
 
         if provider.id == "openai":
             endpoint = QtWidgets.QLineEdit(self.cfg.openai_endpoint())
@@ -240,10 +254,13 @@ class SettingsDialog(QtWidgets.QDialog):
 
         QtWidgets.QApplication.setOverrideCursor(QtGui.QCursor(QtCore.Qt.WaitCursor))
         try:
+            # Reasoning models (Claude 5, gpt-5.x, Gemini 3) think before they
+            # answer, and the thinking spends the same output budget - a tiny
+            # cap makes a working key look broken. 512 covers the thinking.
             reply = provider.chat(
                 ChatRequest(
                     messages=[{"role": "user", "content": "Reply with the single word: OK"}],
-                    model=model, max_tokens=16, temperature=0.0,
+                    model=model, max_tokens=512, temperature=0.0,
                 ),
                 key,
             )
@@ -295,34 +312,55 @@ class SettingsDialog(QtWidgets.QDialog):
 
         A chat round-trip would also work but can take a minute while a local
         model loads; the activation report answers the useful question instantly.
+        Loading the weights is the slow part, so it runs on a worker thread
+        behind a busy dialog - on the GUI thread it would freeze FreeCAD for
+        however long the model takes to load.
         """
         if hasattr(self, "_machine_url"):
             provider.base_url = self._machine_url.text().strip() or provider.base_url
         provider.model_path = self._machine_model.text().strip()
 
-        QtWidgets.QApplication.setOverrideCursor(QtGui.QCursor(QtCore.Qt.WaitCursor))
-        try:
-            # Loading the weights is the slow part, so say what is happening and
-            # do it here rather than surprising the user mid-generation.
-            provider.activate()
-            summary = provider.activation_summary()
-        except LLMError as exc:
-            QtWidgets.QApplication.restoreOverrideCursor()
-            QtWidgets.QMessageBox.critical(self, "Local model", str(exc))
-            self._refresh_machine_status()
-            return
-        except Exception as exc:  # noqa: BLE001
-            summary = str(exc)
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+        progress = QtWidgets.QProgressDialog(
+            "Loading the local model (first load can take a while)…", "", 0, 0, self)
+        progress.setCancelButton(None)
+        progress.setWindowTitle("Local model")
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
 
-        self._refresh_machine_status()
-        models = provider.list_models()
-        if models:
-            summary += f"\n\nLoaded model(s): {', '.join(models)}"
-            QtWidgets.QMessageBox.information(self, "Local model", summary)
+        def job():
+            provider.activate()
+            return provider.activation_summary(), provider.list_models()
+
+        def on_ok(result):
+            summary, models = result
+            self._refresh_machine_status()
+            if models:
+                summary += f"\n\nLoaded model(s): {', '.join(models)}"
+                QtWidgets.QMessageBox.information(self, "Local model", summary)
+            else:
+                QtWidgets.QMessageBox.warning(self, "Local model", summary)
+
+        def on_fail(message):
+            self._refresh_machine_status()
+            QtWidgets.QMessageBox.critical(self, "Local model", message)
+
+        self._test_worker = LLMWorker(job, self)
+        self._test_worker.succeeded.connect(on_ok)
+        self._test_worker.failed.connect(on_fail)
+        self._test_worker.finished.connect(progress.close)
+        self._test_worker.start()
+
+    def _unload_model(self):
+        """Stop a local server this session started and free its memory."""
+        from ..llm import local as local_mod
+
+        if local_mod.deactivate_model():
+            self._machine_status.setText(
+                "Model unloaded - it reloads on the next Generate.")
         else:
-            QtWidgets.QMessageBox.warning(self, "Local model", summary)
+            # Nothing we started is running; just re-state the current facts.
+            self._refresh_machine_status()
 
     def _save(self):
         if hasattr(self, "_machine_url"):

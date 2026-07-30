@@ -6,11 +6,11 @@
     Supports Google Gemini, OpenAI, Anthropic Claude, and local GGUF models run
     on your own machine (no API key, offline) via the Machine Activation SDK.
     Produces validated, structured CAD operations (boxes, cylinders, booleans,
-    fillets, extrudes, and more) built as an editable feature tree, with an
-    optional advanced Python-scripting mode.
+    fillets, extrudes, revolves, and more) built as an editable feature tree,
+    with an optional advanced Python-scripting mode.
   </description>
-  <version>2.4.0</version>
-  <date>2026-07-29</date>
+  <version>2.4.1</version>
+  <date>2026-07-30</date>
   <maintainer email="revhappys2k@gmail.com">Robb Sharma</maintainer>
   <license file="LICENSE.MD">MIT</license>
 

@@ -73,36 +73,6 @@ class EngineeringWidget(QtWidgets.QWidget):
         self._btn(row2, "Rebuild", self._rebuild, "Replay the whole timeline")
         root.addLayout(row2)
 
-    def _build_legacy_ui(self):
-        root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(3)
-
-        root.addWidget(QtWidgets.QLabel("Steps (feature timeline):"))
-        self.steps = QtWidgets.QListWidget()
-        self.steps.setMinimumHeight(40)
-        self.steps.currentRowChanged.connect(self._on_select)
-        root.addWidget(self.steps, 1)
-
-        row = QtWidgets.QHBoxLayout()
-        self._btn(row, "+ AI step", self.add_ai, "Generate the next step from the description box")
-        self._btn(row, "+ Manual", self._manual_add, "Add a step by hand with exact parameters")
-        self._btn(row, "↑", lambda: self._move(-1), "Move step up")
-        self._btn(row, "↓", lambda: self._move(1), "Move step down")
-        self._btn(row, "🗑", self._delete, "Delete step")
-        root.addLayout(row)
-
-        root.addWidget(QtWidgets.QLabel("Edit selected step:"))
-        self._form_host = QtWidgets.QWidget()
-        self._form_layout = QtWidgets.QVBoxLayout(self._form_host)
-        self._form_layout.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(self._form_host)
-
-        row2 = QtWidgets.QHBoxLayout()
-        self._btn(row2, "Apply edit", self._apply, "Apply parameter changes and rebuild")
-        self._btn(row2, "Rebuild all", self._rebuild, "Replay the whole timeline")
-        root.addLayout(row2)
-
     def _btn(self, layout, text, slot, tip=""):
         b = QtWidgets.QPushButton(text)
         b.setMaximumHeight(26)

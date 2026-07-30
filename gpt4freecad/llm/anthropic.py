@@ -14,6 +14,15 @@ _NO_SAMPLING_PREFIXES = (
     "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5",
 )
 
+# Models that think by default. Thinking output shares the max_tokens budget
+# with the visible reply, so a cloud-sized cap (the app default is 4096, the
+# Settings test used 16) truncates the answer mid-plan or cuts it off before
+# any text at all. Give these models a floor, like the Gemini adapter does.
+_THINKING_DEFAULT_PREFIXES = (
+    "claude-fable-5", "claude-mythos", "claude-opus-5", "claude-sonnet-5",
+)
+_MIN_THINKING_MAX_TOKENS = 16384
+
 # Models whose safety classifiers can decline a request (stop_reason "refusal").
 # The server-side fallback beta reruns the same request on another Claude model
 # inside the same call instead of returning the refusal.
@@ -29,8 +38,9 @@ class AnthropicProvider(Provider):
     default_models = [
         "claude-opus-5",
         "claude-fable-5",
+        "claude-sonnet-5",
         "claude-sonnet-4-6",
-        "claude-haiku-4-5-20251001",
+        "claude-haiku-4-5",
     ]
 
     def chat(self, request: ChatRequest, api_key: str) -> str:
@@ -45,10 +55,14 @@ class AnthropicProvider(Provider):
             for m in messages
         ]
 
+        max_tokens = request.max_tokens
+        if model.startswith(_THINKING_DEFAULT_PREFIXES):
+            max_tokens = max(max_tokens, _MIN_THINKING_MAX_TOKENS)
+
         payload = {
             "model": request.model,
             "messages": msgs,
-            "max_tokens": request.max_tokens,
+            "max_tokens": max_tokens,
         }
         if not model.startswith(_NO_SAMPLING_PREFIXES):
             payload["temperature"] = request.temperature

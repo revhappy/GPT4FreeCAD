@@ -133,11 +133,6 @@ def system_prompt(units: str = "mm", *, engineering: bool = False, print_profile
     return "\n\n".join(parts)
 
 
-def structured_system_prompt(units: str = "mm") -> str:
-    """Back-compatible casual-mode prompt (no addenda)."""
-    return system_prompt(units)
-
-
 def step_system_prompt(units: str, program, *, engineering: bool = True, print_profile=None,
                        part_layout: str = "fused") -> str:
     """Prompt for adding ONE step to an existing program (engineering timeline)."""
@@ -159,10 +154,19 @@ increment that satisfies the user's request for THIS step. Do NOT repeat earlier
 object names must be unique; reference existing names where appropriate."""
 
 
-def repair_prompt(error_message: str) -> str:
-    """Follow-up user message asking the model to fix an invalid program."""
+def repair_prompt(error_message: str, failed_reply: str = "") -> str:
+    """Follow-up user message asking the model to fix an invalid program.
+
+    ``failed_reply`` is the model's own rejected output, echoed back (truncated)
+    so a repair round can see what it is fixing - the conversation history does
+    not contain a reply that never validated.
+    """
+    reply_section = ""
+    if failed_reply:
+        reply_section = f"Your previous reply was:\n\n{failed_reply[:4000]}\n\n"
     return (
         "The previous JSON program was invalid and could not be built. "
+        f"{reply_section}"
         "Error:\n\n"
         f"{error_message}\n\n"
         "Return a corrected JSON program (object with an 'operations' array) and nothing else."

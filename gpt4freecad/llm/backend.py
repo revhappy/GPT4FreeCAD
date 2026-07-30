@@ -22,6 +22,7 @@ not a wall.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import platform
@@ -194,6 +195,9 @@ def is_serving(base_url: str, timeout: int = 3) -> bool:
 
 
 _PROCESS: Optional[subprocess.Popen] = None
+# On Windows a child process outlives its parent, so without this hook closing
+# FreeCAD would orphan a multi-gigabyte llama-server. Registered on first start.
+_ATEXIT_REGISTERED = False
 
 
 def start(model_path: str, base_url: str, *, port: int,
@@ -239,6 +243,10 @@ def start(model_path: str, base_url: str, *, port: int,
     except OSError as exc:
         raise BackendError(f"Could not run the inference backend {binary}: {exc}") from exc
     _PROCESS = process
+    global _ATEXIT_REGISTERED
+    if not _ATEXIT_REGISTERED:
+        atexit.register(stop)
+        _ATEXIT_REGISTERED = True
     _pump(process, log)
 
     deadline = time.time() + ready_timeout

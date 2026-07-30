@@ -61,7 +61,12 @@ class GeminiProvider(Provider):
         model = request.model.split("/")[-1]  # tolerate a "models/" prefix
 
         generation_config = {}
+        timeout = request.timeout
         if _is_gemini3(model):
+            # Reasoning before answering can outlast the default 120 s timeout
+            # at higher thinking levels (the Anthropic and local adapters make
+            # the same allowance).
+            timeout = max(timeout, 300)
             # Do NOT send temperature (let it default to 1.0 per Google's docs).
             generation_config["maxOutputTokens"] = max(
                 request.max_tokens, _GEMINI3_MIN_OUTPUT_TOKENS
@@ -83,7 +88,7 @@ class GeminiProvider(Provider):
             payload["systemInstruction"] = {"parts": [{"text": system_text}]}
 
         url = f"{_BASE}/{model}:generateContent?key={api_key}"
-        data = http_post_json(url, payload, timeout=request.timeout)
+        data = http_post_json(url, payload, timeout=timeout)
         return _extract_text(data)
 
 

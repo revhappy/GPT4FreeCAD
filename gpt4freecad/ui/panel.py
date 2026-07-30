@@ -15,8 +15,6 @@ from ..llm import all_providers, get_provider
 from .. import engine, harness
 from ..cad import prompts, schema, templates
 
-_SHAPE_HINTS = ["(auto)", "box", "cylinder", "sphere", "cone", "torus",
-                "extruded profile", "assembly of primitives"]
 _UNITS = ["mm", "cm", "m", "in"]
 _MODES = [("Structured", "structured"),
           ("Engineering", "engineering"),
@@ -28,6 +26,9 @@ _THINKING = [("Default", "default"), ("Minimal", "minimal"), ("Low", "low"),
 _UI_VERSION = "compact-6"
 # Shown in the model dropdown when the local provider has no .gguf chosen yet.
 _NO_LOCAL_MODEL = "(choose a model…)"
+# Keep this many recent conversation messages (user + assistant); older turns
+# are dropped so a long session cannot grow the prompt without bound.
+_HISTORY_MAX = 24
 
 
 class GPTPanel(QtWidgets.QWidget):
@@ -252,190 +253,6 @@ class GPTPanel(QtWidgets.QWidget):
         root.addWidget(self.status)
 
         self._reload_templates()
-
-    def _build_legacy_ui(self):
-        self.setMinimumSize(120, 86)
-        self.setSizePolicy(
-            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
-
-        root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(3, 3, 3, 3)
-        root.setSpacing(3)
-
-        # Keep the prompt at the top. Even if the dock is partly below the
-        # screen, the description and Generate action remain immediately
-        # reachable instead of being trapped at the bottom.
-        composer = QtWidgets.QWidget()
-        composer.setMinimumSize(0, 0)
-        composer_layout = QtWidgets.QVBoxLayout(composer)
-        composer_layout.setContentsMargins(0, 0, 0, 0)
-        composer_layout.setSpacing(2)
-
-        self.input = QtWidgets.QPlainTextEdit()
-        self.input.setPlaceholderText(
-            "Describe the part or next engineering step...")
-        self.input.setMinimumHeight(34)
-        self.input.setMaximumHeight(48)
-        composer_layout.addWidget(self.input)
-
-        self.generate_btn = QtWidgets.QPushButton("Generate")
-        self.generate_btn.setDefault(True)
-        self.generate_btn.setMinimumHeight(26)
-        self.generate_btn.setMaximumHeight(30)
-        self.generate_btn.setToolTip("Generate a CAD plan from the description above.")
-        self.generate_btn.clicked.connect(self._on_generate)
-        composer_layout.addWidget(self.generate_btn)
-
-        self.status = QtWidgets.QLabel("Ready.")
-        self.status.setStyleSheet("color: gray;")
-        self.status.setMaximumHeight(18)
-        root.addWidget(composer)
-        root.addWidget(self.status)
-
-        # Everything else yields space and scrolls independently.
-        content = QtWidgets.QWidget()
-        content.setMinimumSize(0, 0)
-        content_layout = QtWidgets.QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(3)
-
-        # --- header: provider / model / settings ---
-        header = QtWidgets.QGridLayout()
-        header.addWidget(QtWidgets.QLabel("Provider:"), 0, 0)
-        self.provider_combo = QtWidgets.QComboBox()
-        self.provider_combo.setMaximumHeight(24)
-        for p in all_providers():
-            self.provider_combo.addItem(p.label, p.id)
-        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
-        header.addWidget(self.provider_combo, 0, 1)
-
-        self.settings_btn = QtWidgets.QToolButton()
-        self.settings_btn.setMaximumSize(26, 24)
-        self.settings_btn.setText("⚙")
-        self.settings_btn.setToolTip("Settings (API keys, models, 3D printing)")
-        self.settings_btn.clicked.connect(self._open_settings)
-        header.addWidget(self.settings_btn, 0, 2)
-
-        header.addWidget(QtWidgets.QLabel("Model:"), 1, 0)
-        self.model_combo = QtWidgets.QComboBox()
-        self.model_combo.setMaximumHeight(24)
-        self.model_combo.setEditable(True)
-        self.model_combo.currentTextChanged.connect(self._on_model_changed)
-        header.addWidget(self.model_combo, 1, 1, 1, 2)
-        content_layout.addLayout(header)
-
-        # --- mode + units + thinking + print ---
-        mode_row = QtWidgets.QGridLayout()
-        mode_row.addWidget(QtWidgets.QLabel("Mode:"), 0, 0)
-        self.mode_combo = QtWidgets.QComboBox()
-        self.mode_combo.setMaximumHeight(24)
-        for label, _ in _MODES:
-            self.mode_combo.addItem(label)
-        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        mode_row.addWidget(self.mode_combo, 0, 1, 1, 3)
-
-        self.units_label = QtWidgets.QLabel("Units:")
-        mode_row.addWidget(self.units_label, 1, 0)
-        self.units_combo = QtWidgets.QComboBox()
-        self.units_combo.setMaximumHeight(24)
-        self.units_combo.addItems(_UNITS)
-        self.units_combo.currentTextChanged.connect(
-            lambda t: None if self._loading else self.cfg.set_units(t))
-        mode_row.addWidget(self.units_combo, 1, 1)
-
-        self.thinking_label = QtWidgets.QLabel("Thinking:")
-        mode_row.addWidget(self.thinking_label, 1, 2)
-        self.thinking_combo = QtWidgets.QComboBox()
-        self.thinking_combo.setMaximumHeight(24)
-        for label, value in _THINKING:
-            self.thinking_combo.addItem(label, value)
-        self.thinking_combo.setToolTip(
-            "Gemini 3 reasoning depth. Lower = faster/cheaper; higher = more careful.")
-        self.thinking_combo.currentIndexChanged.connect(self._on_thinking_changed)
-        mode_row.addWidget(self.thinking_combo, 1, 3)
-        mode_row.setColumnStretch(1, 1)
-        mode_row.setColumnStretch(3, 1)
-        content_layout.addLayout(mode_row)
-
-        self.print_check = QtWidgets.QCheckBox("3D-print mode (printability + bed fit + STL)")
-        self.print_check.toggled.connect(self._on_print_toggled)
-        content_layout.addWidget(self.print_check)
-
-        # --- results log ---
-        self.log = QtWidgets.QTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMinimumHeight(36)
-        content_layout.addWidget(self.log, 1)
-
-        # --- central stack: casual page (preview) vs engineering page ---
-        self.stack = QtWidgets.QStackedWidget()
-
-        casual = QtWidgets.QWidget()
-        cv = QtWidgets.QVBoxLayout(casual)
-        cv.setContentsMargins(0, 0, 0, 0)
-        self.preview_label = QtWidgets.QLabel("Plan (JSON):")
-        cv.addWidget(self.preview_label)
-        self.preview = QtWidgets.QPlainTextEdit()
-        self.preview.setPlaceholderText(
-            "The generated plan / code appears here. You can edit it before pressing Build.")
-        mono = QtGui.QFont("Consolas")
-        mono.setFixedPitch(True)
-        self.preview.setFont(mono)
-        self.preview.setMinimumHeight(36)
-        cv.addWidget(self.preview, 1)
-        self.shape_row = QtWidgets.QWidget()
-        sr = QtWidgets.QHBoxLayout(self.shape_row)
-        sr.setContentsMargins(0, 0, 0, 0)
-        sr.addWidget(QtWidgets.QLabel("Shape:"))
-        self.shape_combo = QtWidgets.QComboBox()
-        self.shape_combo.setMaximumHeight(24)
-        self.shape_combo.addItems(_SHAPE_HINTS)
-        sr.addWidget(self.shape_combo, 1)
-        cv.addWidget(self.shape_row)
-        self.stack.addWidget(casual)                       # index 0
-
-        self.eng = EngineeringWidget(self)
-        self.stack.addWidget(self.eng)                     # index 1
-        content_layout.addWidget(self.stack, 2)
-
-        self.content_scroll = QtWidgets.QScrollArea()
-        self.content_scroll.setWidgetResizable(True)
-        self.content_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.content_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.content_scroll.setMinimumSize(0, 0)
-        self.content_scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustIgnored)
-        self.content_scroll.setSizePolicy(
-            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
-        self.content_scroll.setWidget(content)
-        root.addWidget(self.content_scroll, 1)
-
-        btns = QtWidgets.QHBoxLayout()
-        btns.setSpacing(2)
-
-        self.build_btn = QtWidgets.QPushButton("Build")
-        self.build_btn.setToolTip("Build the geometry from the plan above.")
-        self.build_btn.clicked.connect(self._on_build_clicked)
-        self.build_btn.setEnabled(False)
-        self.build_btn.setMaximumHeight(26)
-        btns.addWidget(self.build_btn, 1)
-
-        self.export_btn = QtWidgets.QPushButton("Export STL…")
-        self.export_btn.setToolTip("Export the built result as an STL mesh.")
-        self.export_btn.clicked.connect(self._on_export_stl)
-        self.export_btn.setEnabled(False)
-        self.export_btn.setMaximumHeight(26)
-        btns.addWidget(self.export_btn, 1)
-
-        self.undo_btn = QtWidgets.QPushButton("Undo")
-        self.undo_btn.clicked.connect(self._on_undo)
-        self.undo_btn.setMaximumHeight(26)
-        btns.addWidget(self.undo_btn)
-
-        self.clear_btn = QtWidgets.QPushButton("Clear")
-        self.clear_btn.clicked.connect(self._on_clear)
-        self.clear_btn.setMaximumHeight(26)
-        btns.addWidget(self.clear_btn)
-        content_layout.addLayout(btns)
 
     # ------------------------------------------------------------------ #
     # State load / persistence
@@ -767,6 +584,8 @@ class GPTPanel(QtWidgets.QWidget):
         self.last_result = result
         self.history.append({"role": "user", "content": self._pending_user})
         self.history.append({"role": "assistant", "content": result.raw})
+        if len(self.history) > _HISTORY_MAX:
+            del self.history[: len(self.history) - _HISTORY_MAX]
 
         if result.program is not None:
             self.preview.setPlainText(json.dumps({"operations": result.program}, indent=2))
@@ -813,13 +632,20 @@ class GPTPanel(QtWidgets.QWidget):
         """
         if self._current_mode() != "structured" or not self._repair.can_retry():
             return False
-        if not harness.is_model_output_error(getattr(self._worker, "error", None)):
+        error = getattr(self._worker, "error", None)
+        if not harness.is_model_output_error(error):
             return False  # a bad key or a dead network is not the model's to fix
         self._repair.start_attempt()
         self._set_status(
             f"Invalid plan - asking the model to fix it (round {self._repair.round_label})…")
         self._log_system("Sending the validation error back to the model for a fix…")
-        self._start_generation(prompts.repair_prompt(message), log_as_user=False)
+        # Echo the rejected reply back when the engine attached it: a reply that
+        # never validated is not in the history, so without this the model would
+        # be asked to fix a program it cannot see.
+        failed_reply = getattr(error, "raw_reply", "") or ""
+        self._start_generation(
+            prompts.repair_prompt(message, failed_reply=failed_reply),
+            log_as_user=False)
         return True
 
     # ------------------------------------------------------------------ #
@@ -827,16 +653,18 @@ class GPTPanel(QtWidgets.QWidget):
     # ------------------------------------------------------------------ #
     def _on_build_clicked(self):
         self._repair.reset(self.cfg.repair_rounds())
-        self._build_from_preview()
+        # An explicit Build click means the user has seen (and could edit) the
+        # code in the preview; only then may the Python deny-list be skipped.
+        self._build_from_preview(user_reviewed=True)
 
-    def _build_from_preview(self):
+    def _build_from_preview(self, user_reviewed=False):
         mode = self._current_mode()
         text = self.preview.toPlainText().strip()
         if not text:
             self._set_status("Nothing to build.", error=True)
             return
         if mode == "python":
-            self._build_python(text)
+            self._build_python(text, user_reviewed)
         else:
             self._build_structured(text)
 
@@ -873,10 +701,13 @@ class GPTPanel(QtWidgets.QWidget):
             self._set_status("Done.")
         self._post_build(result_obj, inspected=True)
 
-    def _build_python(self, text):
+    def _build_python(self, text, user_reviewed=False):
         from ..cad import pyrun  # lazy: needs FreeCAD
         try:
-            log_lines, _code = pyrun.run_python_code(text, prechecked=True)
+            # Auto-run executes model output the user never looked at, so the
+            # deny-list must stay on for it; a blocked build feeds the refusal
+            # into the normal repair loop instead of running the code.
+            log_lines, _code = pyrun.run_python_code(text, prechecked=user_reviewed)
         except pyrun.PythonRunError as exc:
             self._handle_build_error(str(exc), failed_payload=text)
             return

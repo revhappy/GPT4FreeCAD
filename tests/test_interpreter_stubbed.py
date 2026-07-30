@@ -139,8 +139,24 @@ def _install_stubs():
     freecad.newDocument = lambda _name: FakeDocument()
 
     part = types.ModuleType("Part")
-    part.Face = object
+
+    class FakeFace:
+        """Records the revolve call so tests can assert axis and angle."""
+
+        def __init__(self, wire):
+            self.wire = wire
+
+        def revolve(self, base, axis, angle):
+            shape = FakeShape(volume=1.0)
+            shape.revolve_angle = angle
+            return shape
+
+        def extrude(self, direction):
+            return FakeShape(volume=1.0)
+
+    part.Face = FakeFace
     part.Feature = object
+    part.makePolygon = lambda points: list(points)
 
     sys.modules.setdefault("FreeCAD", freecad)
     sys.modules.setdefault("Part", part)
@@ -387,6 +403,39 @@ def test_a_null_shape_after_recompute_fails_the_build():
 
 def test_healthy_shapes_pass_the_null_guard():
     interpreter._check_built({"ok": FakeObject("ok", shape=FakeShape(volume=1.0))})
+
+
+# --------------------------------------------------------------------------- #
+# revolve
+# --------------------------------------------------------------------------- #
+def test_revolve_defaults_to_a_full_revolution():
+    doc = FakeDocument()
+    op = {"op": "revolve", "name": "hub", "profile": [[0, 0], [5, 0], [5, 8]]}
+    obj = interpreter._revolve(op, doc, {})
+    assert obj.Shape.revolve_angle == 360
+    assert "hub" in doc.objects
+
+
+def test_revolve_honours_a_partial_angle():
+    doc = FakeDocument()
+    op = {"op": "revolve", "name": "half", "angle": 180,
+          "profile": [[0, 0], [5, 0], [5, 8]]}
+    obj = interpreter._revolve(op, doc, {})
+    assert obj.Shape.revolve_angle == 180
+
+
+def test_revolve_rejects_points_behind_the_axis():
+    """A profile crossing the Z axis would self-intersect when revolved."""
+    doc = FakeDocument()
+    op = {"op": "revolve", "name": "bad",
+          "profile": [[-2, 0], [5, 0], [5, 8]]}
+    try:
+        interpreter._revolve(op, doc, {})
+    except interpreter.InterpreterError as exc:
+        assert "r >= 0" in str(exc)
+        assert "-2" in str(exc)
+    else:
+        raise AssertionError("expected InterpreterError for r < 0")
 
 
 # --------------------------------------------------------------------------- #
