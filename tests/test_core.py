@@ -835,16 +835,22 @@ def test_local_chat_via_http_fallback():
         get_provider("machine").base_url = local_mod.DEFAULT_BASE_URL
 
 
-def test_local_json_mode_sends_grammar_schema():
+def _json_mode_request():
+    return ChatRequest(
+        messages=[{"role": "user", "content": "a plate"}],
+        model="local-model", json_mode=True, json_schema=schema.json_schema(),
+    )
+
+
+def test_local_json_mode_sends_grammar_schema_to_machine_serve():
+    """A server that can enforce a schema gets one."""
     captured = {}
     originals = _patch_local(
         captured, {"choices": [{"message": {"content": '{"operations": []}'}}]})
+    provider = get_provider("machine")
+    local_mod._SUPPORTS_SCHEMA[provider.base_url.rstrip("/")] = True
     try:
-        req = ChatRequest(
-            messages=[{"role": "user", "content": "a plate"}],
-            model="local-model", json_mode=True, json_schema=schema.json_schema(),
-        )
-        get_provider("machine").chat(req, "")
+        provider.chat(_json_mode_request(), "")
         fmt = captured["payload"]["response_format"]
         assert fmt["type"] == "json_schema"
         # The CAD program schema is what gets compiled to a GBNF grammar.
@@ -857,6 +863,31 @@ def test_local_json_mode_sends_grammar_schema():
         assert "length" in branches["box"]["required"]
     finally:
         _restore_local(originals)
+        local_mod._SUPPORTS_SCHEMA.clear()
+
+
+def test_local_json_mode_skips_the_schema_on_a_bare_llama_server():
+    """A bare llama-server must NOT be sent a schema.
+
+    Its own schema-to-grammar conversion of the CAD program schema is
+    pathologically slow (measured on llama.cpp b10182: a single-operation schema
+    returned nothing in 40s+, the full one did not finish in 400s). Constraining
+    there makes a working model look broken; the prompt, the tolerant JSON
+    extractor and the auto-repair harness cover it instead.
+    """
+    captured = {}
+    originals = _patch_local(
+        captured, {"choices": [{"message": {"content": '{"operations": []}'}}]})
+    provider = get_provider("machine")
+    local_mod._SUPPORTS_SCHEMA[provider.base_url.rstrip("/")] = False
+    try:
+        provider.chat(_json_mode_request(), "")
+        assert "response_format" not in captured["payload"]
+        # The request still goes through - just unconstrained.
+        assert captured["payload"]["messages"][0]["content"] == "a plate"
+    finally:
+        _restore_local(originals)
+        local_mod._SUPPORTS_SCHEMA.clear()
 
 
 def test_local_empty_reply_and_missing_server_are_clear():
