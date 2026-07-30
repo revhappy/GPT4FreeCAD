@@ -1,5 +1,32 @@
 # GPT4FreeCAD Changelog
 
+## [2.4.2] - 2026-07-30
+
+Local models get the output guarantee on every server, not just one.
+
+### Changed
+- **Structured mode is now grammar-constrained on any local server.** The addon
+  compiles the CAD schema to a GBNF grammar itself (`llm/gbnf.py`, vendored
+  from the Machine Activation SDK, standard library only) and sends a ready
+  grammar, which llama.cpp enforces in its sampler. Previously only
+  `machine serve` got enforcement: `supports_schema()` probed for it and
+  **disabled constraints entirely** on a bare `llama-server` — which is the
+  server this addon starts for you, so the common case ran unconstrained and
+  leaned on auto-repair.
+  - That probe was written on the belief that a bare server's own
+    schema-to-grammar conversion was pathologically slow (reportedly 400 s+ for
+    the full schema). Re-measured against the same llama.cpp build
+    (`b10182-afeebe103`), it is not: ~190 ms of per-request setup. The
+    workaround was unnecessary, and skipping enforcement cost far more than it
+    saved. It is gone.
+  - Verified end to end: a bare `llama-server` running a 1.7 B model returned a
+    valid four-operation program (box → cylinder → cut → fillet) that passes
+    the validator on the first attempt.
+  - The grammar is compiled once per schema and cached; the two
+    `response_format` spellings remain as a fallback for a server that ignores
+    `grammar`.
+- 113 unit tests (was 111).
+
 ## [2.4.1] - 2026-07-30
 
 A lathe, and a hardening pass over the last two releases.
