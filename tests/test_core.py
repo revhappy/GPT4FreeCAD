@@ -1008,6 +1008,22 @@ def test_harness_budget_and_reset():
     assert not s.can_retry()  # 0 disables auto-repair entirely
 
 
+def test_only_model_mistakes_are_worth_repairing():
+    """The repair budget must not be spent on a bad key or a dead network."""
+    from gpt4freecad.llm.base import AuthError, RateLimitError
+
+    transient = LLMError("Network error: connection refused")
+    transient.transient = True
+
+    assert harness.is_model_output_error(schema.SchemaError("bad profile"))
+    assert harness.is_model_output_error(LLMError("Model did not return valid JSON"))
+    assert not harness.is_model_output_error(AuthError("HTTP 401"))
+    assert not harness.is_model_output_error(RateLimitError("HTTP 429"))
+    assert not harness.is_model_output_error(transient)
+    assert not harness.is_model_output_error(None)
+    assert not harness.is_model_output_error(ValueError("unrelated"))
+
+
 def test_harness_repeat_detection():
     s = harness.RepairSession()
     ops = [{"op": "box", "name": "b", "length": 1, "width": 1, "height": 1}]

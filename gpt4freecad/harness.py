@@ -14,7 +14,28 @@ import hashlib
 import json
 from typing import Any, Optional, Set
 
+from .cad.schema import SchemaError
+from .llm.base import AuthError, LLMError, RateLimitError
+
 DEFAULT_ROUNDS = 3
+
+
+def is_model_output_error(error: Optional[BaseException]) -> bool:
+    """True when a failure is something the model could plausibly fix.
+
+    A rejected plan or an unparseable reply is worth sending back. A missing API
+    key, a rate limit or a dead network is not - retrying those only spends the
+    repair budget against a wall, and the user needs to see the real cause.
+    """
+    if isinstance(error, SchemaError):
+        return True
+    if error is None or isinstance(error, (AuthError, RateLimitError)):
+        return False
+    if isinstance(error, LLMError):
+        # Transport failures are tagged transient by the HTTP layer, which has
+        # already retried them; anything else is the model's own reply.
+        return not getattr(error, "transient", False)
+    return False
 
 
 def fingerprint(payload: Any) -> str:

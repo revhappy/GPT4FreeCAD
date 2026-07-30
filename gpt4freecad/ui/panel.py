@@ -797,8 +797,31 @@ class GPTPanel(QtWidgets.QWidget):
             self._set_status("Review the plan, then press Build.")
 
     def _on_failed(self, message):
-        self._set_status("Generation failed.", error=True)
         self._log_error(message)
+        if self._try_plan_repair(message):
+            return
+        self._set_status("Generation failed.", error=True)
+
+    def _try_plan_repair(self, message) -> bool:
+        """Send a plan that failed validation back to the model, within budget.
+
+        The repair budget used to cover only failures *after* a plan arrived -
+        build errors and defective geometry. A plan rejected by the validator
+        (a 3D point where a 2D one belongs, a scalar where a list belongs, a name
+        reused) got one attempt inside the engine and then surfaced raw, which is
+        the most common failure by far on a small local model with no grammar to
+        keep it honest.
+        """
+        if self._current_mode() != "structured" or not self._repair.can_retry():
+            return False
+        if not harness.is_model_output_error(getattr(self._worker, "error", None)):
+            return False  # a bad key or a dead network is not the model's to fix
+        self._repair.start_attempt()
+        self._set_status(
+            f"Invalid plan - asking the model to fix it (round {self._repair.round_label})…")
+        self._log_system("Sending the validation error back to the model for a fix…")
+        self._start_generation(prompts.repair_prompt(message), log_as_user=False)
+        return True
 
     # ------------------------------------------------------------------ #
     # Building geometry (main thread)
