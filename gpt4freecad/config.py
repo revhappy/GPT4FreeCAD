@@ -167,6 +167,13 @@ class Config:
     def set_machine_base_url(self, url: str) -> None:
         self._b.set_str("machine_base_url", (url or "").strip())
 
+    def machine_model_path(self) -> str:
+        """Local .gguf to activate on demand. Empty = attach to a server only."""
+        return self._b.get_str("machine_model_path", "").strip()
+
+    def set_machine_model_path(self, path: str) -> None:
+        self._b.set_str("machine_model_path", (path or "").strip())
+
     # --- generation params ------------------------------------------------ #
     def temperature(self) -> float:
         return self._b.get_float("temperature", 0.2)

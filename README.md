@@ -163,6 +163,14 @@ objects defined earlier, unique names, positive dimensions — stay with the val
 the auto-repair harness above. Verified on `gemma-4-E4B-it` (IQ4_NL, CPU): plate-with-a-hole
 and filleted-cube both produced valid programs on the first attempt, no repair round needed.
 
+> **Known limitation — which local server you run matters.** That result is through
+> `machine serve`, which compiles the schema to a grammar with the SDK's own converter. Pointed
+> at a **bare `llama-server`**, the same schema goes through llama.cpp's built-in converter and
+> sampling becomes impractically slow (a request that takes ~40 s via `machine serve` did not
+> finish in 10 minutes). Until that is addressed, use `machine serve` for Structured and
+> Engineering modes on a local model; a bare `llama-server` is fine for Python mode, which has
+> no grammar. Tracked as a follow-up.
+
 Optionally `pip install machine-activation` (dependency-free, stdlib only) for the full
 activation report. Without it GPT4FreeCAD speaks the same HTTP directly, so the provider
 still works in FreeCAD's bundled Python.

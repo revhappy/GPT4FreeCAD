@@ -892,6 +892,59 @@ def test_local_engine_structured_passes_schema_to_provider():
     assert seen["schema"]["required"] == ["operations"]
 
 
+def test_activate_model_is_a_noop_without_a_model_path():
+    """Attach-only mode: no model configured means nothing to start."""
+    assert local_mod.activate_model("", "http://127.0.0.1:1") is None
+
+
+def test_activate_model_reports_a_missing_file_clearly():
+    """A typo'd path must name the file, not surface a server error."""
+    original = local_mod._reachable
+    local_mod._reachable = lambda base_url: False
+    try:
+        missing = os.path.join(tempfile.gettempdir(), "gpt4freecad-no-such-model.gguf")
+        try:
+            local_mod.activate_model(missing, "http://127.0.0.1:1")
+        except LLMError as exc:
+            # Either the SDK is absent (install hint) or the file check fires;
+            # both must name the model rather than blaming the network.
+            assert missing in str(exc)
+        else:
+            raise AssertionError("expected LLMError for a missing model file")
+    finally:
+        local_mod._reachable = original
+
+
+def test_activate_model_skips_when_a_server_is_already_serving():
+    """Reuse beats loading a second copy of a multi-gigabyte model."""
+    original = local_mod._reachable
+    local_mod._reachable = lambda base_url: True
+    try:
+        assert local_mod.activate_model("/some/model.gguf", "http://127.0.0.1:8177") is None
+    finally:
+        local_mod._reachable = original
+
+
+def test_port_is_parsed_from_the_base_url():
+    assert local_mod._port_of("http://127.0.0.1:9123") == 9123
+    assert local_mod._port_of("http://127.0.0.1") == 8177  # default
+    assert local_mod._port_of("not a url") == 8177         # never raises
+
+
+def test_config_machine_model_path():
+    path = os.path.join(tempfile.gettempdir(), "gpt4freecad-test-model.json")
+    if os.path.exists(path):
+        os.remove(path)
+    cfg = Config(_JsonBackend(path))
+    try:
+        assert cfg.machine_model_path() == ""  # attach-only by default
+        cfg.set_machine_model_path("  C:/models/foo.gguf  ")
+        assert cfg.machine_model_path() == "C:/models/foo.gguf"
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
 def test_config_machine_base_url():
     path = os.path.join(tempfile.gettempdir(), "gpt4freecad-test-machine.json")
     if os.path.exists(path):

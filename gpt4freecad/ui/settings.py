@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from .qt import QtCore, QtGui, QtWidgets, exec_dialog
 from ..config import get_config
 from ..llm import all_providers, get_provider, ChatRequest
@@ -74,20 +76,49 @@ class SettingsDialog(QtWidgets.QDialog):
             form.addRow("API key:", key_wrap)
         else:
             note = QtWidgets.QLabel(
-                "Runs on this machine - no API key, no cloud, works offline. "
-                "Start a server with <code>machine serve &lt;model.gguf&gt;</code>, "
-                "then press Test connection."
+                "Runs on this machine — no API key, no cloud, works offline. "
+                "<b>Pick a model file below and you're done;</b> GPT4FreeCAD "
+                "starts and stops it for you."
             )
             note.setWordWrap(True)
             form.addRow("", note)
 
         if provider.id == "machine":
+            self._machine_model = QtWidgets.QLineEdit(self.cfg.machine_model_path())
+            self._machine_model.setPlaceholderText("Choose a .gguf model file…")
+            self._machine_model.setToolTip(
+                "The local model to run. GPT4FreeCAD loads it on first use - "
+                "no terminal, no server to start.")
+            browse = QtWidgets.QPushButton("Choose…")
+            browse.setDefault(False)
+            browse.setAutoDefault(False)
+            browse.clicked.connect(self._pick_model)
+            model_row = QtWidgets.QHBoxLayout()
+            model_row.addWidget(self._machine_model, 1)
+            model_row.addWidget(browse)
+            model_wrap = QtWidgets.QWidget()
+            model_wrap.setLayout(model_row)
+            form.addRow("Model:", model_wrap)
+
+            self._machine_status = QtWidgets.QLabel()
+            self._machine_status.setWordWrap(True)
+            self._machine_status.setStyleSheet("color: gray;")
+            form.addRow("", self._machine_status)
+            self._refresh_machine_status()
+
+            # Plumbing almost nobody should touch: only relevant when attaching
+            # to a server started elsewhere. A checkable group box stays greyed
+            # out until it is ticked, so it reads as optional.
+            advanced = QtWidgets.QGroupBox("Advanced — attach to a server I started myself")
+            advanced.setCheckable(True)
+            advanced.setChecked(False)
+            advanced_form = QtWidgets.QFormLayout(advanced)
             self._machine_url = QtWidgets.QLineEdit(self.cfg.machine_base_url())
             self._machine_url.setToolTip(
-                "Base URL of the local Machine Activation server "
-                "(default http://127.0.0.1:8177)."
-            )
-            form.addRow("Server URL:", self._machine_url)
+                "Where the local server listens. Change this only to attach to a "
+                "server you started yourself (default http://127.0.0.1:8177).")
+            advanced_form.addRow("Server URL:", self._machine_url)
+            form.addRow("", advanced)
 
         model_combo = QtWidgets.QComboBox()
         model_combo.setEditable(True)
@@ -227,6 +258,38 @@ class SettingsDialog(QtWidgets.QDialog):
             QtWidgets.QApplication.restoreOverrideCursor()
             QtWidgets.QMessageBox.critical(self, "Test failed", str(exc))
 
+    def _pick_model(self):
+        """Native file dialog for a .gguf. The only step a local model needs."""
+        start = self._machine_model.text().strip() or ""
+        start_dir = os.path.dirname(start) if start else ""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Choose a local model", start_dir,
+            "Model files (*.gguf *.mcart);;All files (*)")
+        if path:
+            self._machine_model.setText(path)
+            self._refresh_machine_status()
+
+    def _refresh_machine_status(self):
+        """One line on what will happen when Generate is pressed."""
+        from ..llm import local as local_mod
+
+        model = self._machine_model.text().strip()
+        running = local_mod.activated_model()
+        if running:
+            self._machine_status.setText(f"Model loaded and serving at {running}.")
+        elif model:
+            name = os.path.basename(model)
+            if os.path.isfile(model):
+                size = os.path.getsize(model) / (1024 ** 3)
+                self._machine_status.setText(
+                    f"{name} ({size:.1f} GB) — loads automatically on first use.")
+            else:
+                self._machine_status.setText(f"File not found: {model}")
+        else:
+            self._machine_status.setText(
+                "No model chosen. Pick a .gguf file, or tick Advanced to attach "
+                "to a server you started yourself.")
+
     def _test_local(self, provider):
         """Report the activation contract: does this model fit, on what hardware.
 
@@ -235,13 +298,25 @@ class SettingsDialog(QtWidgets.QDialog):
         """
         if hasattr(self, "_machine_url"):
             provider.base_url = self._machine_url.text().strip() or provider.base_url
+        provider.model_path = self._machine_model.text().strip()
+
         QtWidgets.QApplication.setOverrideCursor(QtGui.QCursor(QtCore.Qt.WaitCursor))
         try:
+            # Loading the weights is the slow part, so say what is happening and
+            # do it here rather than surprising the user mid-generation.
+            provider.activate()
             summary = provider.activation_summary()
+        except LLMError as exc:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.critical(self, "Local model", str(exc))
+            self._refresh_machine_status()
+            return
         except Exception as exc:  # noqa: BLE001
             summary = str(exc)
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
+
+        self._refresh_machine_status()
         models = provider.list_models()
         if models:
             summary += f"\n\nLoaded model(s): {', '.join(models)}"
@@ -252,6 +327,8 @@ class SettingsDialog(QtWidgets.QDialog):
     def _save(self):
         if hasattr(self, "_machine_url"):
             self.cfg.set_machine_base_url(self._machine_url.text())
+        if hasattr(self, "_machine_model"):
+            self.cfg.set_machine_model_path(self._machine_model.text())
         for pid, edit in self._key_edits.items():
             self.cfg.set_api_key(pid, edit.text())
         for pid, combo in self._model_combos.items():
