@@ -135,6 +135,8 @@ class EngineeringWidget(QtWidgets.QWidget):
         if ctx["provider"].requires_key and not ctx["api_key"]:
             self.host._log_error(f"No API key for {ctx['provider'].label}. Open Settings (⚙).")
             return
+        if not self.host._local_model_ready(ctx["provider"]):
+            return
         self.host._log_user(desc)
         self.host._repair.reset(self.host.cfg.repair_rounds())
         self._pending_desc = desc
