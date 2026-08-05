@@ -305,8 +305,14 @@ class EngineeringWidget(QtWidgets.QWidget):
         self.created_names = [o.Name for o in objects.values()]
         assembly_note = " as separate assembly components" if "__assembly__" in objects else ""
         self.host._log_system(f"Rebuilt {len(self.program)} step(s){assembly_note}.")
-        self.host._post_build(result)
-        self.host._set_status("Built.")
+        # Inspect every end product, not just the last step's object. The
+        # timeline drives its own repairs (per-step), so this only reports.
+        _leaves, problems = self.host._inspect_program(self.program, objects)
+        if problems:
+            self.host._log_error("Geometry warnings: " + "; ".join(problems))
+        self.host._post_build(result, inspected=True)
+        self.host._set_status("Built with geometry warnings." if problems else "Built.",
+                              error=bool(problems))
         return True
 
     def _remove_created(self):

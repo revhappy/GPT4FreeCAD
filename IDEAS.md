@@ -6,8 +6,10 @@ Backlog of ideas worth building, mostly harvested from the open-source
 engineering defaults, post-build geometry inspection + repair loop. Implemented in
 2.3.0: template library of common setups (six built-in starters + "Save plan as
 template", replacing the Shape hint with a Template picker). Implemented in 2.4.1:
-the `revolve` op. Everything below is **not yet implemented**, roughly in priority
-order.
+the `revolve` op. Implemented in 2.5.0: whole-program inspection (every end
+product, not just the last object), semantic validation of the values OCC
+silently rewrites, and the warning-triggered self-review round. Everything below
+is **not yet implemented**, roughly in priority order.
 
 ## 1. `sweep` / `loft` / `helix`
 `revolve` (2.4.1) closed the biggest expressiveness gap; these are the rest of it.
@@ -44,12 +46,20 @@ CAD Skills mandates a snapshot after every build so the agent can *see* its work
   description. Requires provider payload changes (image parts) + a UI attach button.
 
 ## 5. Deeper inspection
-- Inspect **each component** in Separate layout (currently only the final result
-  object is inspected), e.g. walk the `GPT4FreeCAD_Assembly` group.
-- **Dimension verification**: extract user-stated dimensions from the request and
-  check them against the built bounding box / feature sizes (CAD Skills workflow
-  step 8: "verify user-specified dimensions").
-- Interference/clearance checks between separate components.
+2.5.0 took the first two items: every end product is inspected (`schema.leaf_names()`
++ `inspect.inspect_leaves()`), and the largest user-stated dimension is checked against
+the built bounding box. What is left:
+- **Interference/clearance checks** between separate components — the natural next
+  step now that each component is measured individually.
+- **Feature-level dimension verification**: the current check is deliberately
+  conservative (largest stated length, single-part results only), because a
+  description mixes overall sizes with hole diameters and wall thicknesses and
+  nothing distinguishes them. Matching stated dimensions to *specific features*
+  (this 5 mm is a hole, that 60 mm is a bolt circle) needs the model's help, and
+  is what would let the check cover every number in the request.
+- **Overlapping patterns**: `linear_pattern` with spacing smaller than the source
+  fuses its copies into one blob (5 copies of a 1000 mm³ box measured 1400 mm³, not
+  5000). Legitimate for some designs, so it needs intent, not a hard rule.
 
 ## 6. More export formats
 3MF (colour/multi-material printing, `Mesh.export`) and GLB/glTF (web preview,

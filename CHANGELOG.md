@@ -1,5 +1,73 @@
 # GPT4FreeCAD Changelog
 
+## [2.5.0] - 2026-08-05
+
+Catches the failures that never looked like failures.
+
+The repair loop only ever fired on something that announced itself: a rejected
+plan, a build error, an inspection warning. Probing 26 schema-valid programs
+against FreeCAD 1.1 found that the more common bad outcome announces nothing.
+Eight of them built successfully, passed inspection as clean, and produced
+geometry that was not what was asked for.
+
+### Fixed
+- **`_check_built` tested only for a null shape.** OCC also returns shapes that
+  exist and are wrong. A `fillet` of radius 50 on a 10 mm box yielded a
+  self-intersecting solid of **volume −21025 mm³ with a 932×990×397 mm bounding
+  box**, which was not null, so it was committed as the finished part. The check
+  now tests validity and positive volume, and runs against *every* object rather
+  than the last one — so the error names the operation that caused it. This alone
+  catches the collinear profile, the bowtie, the zero-radii cone, the on-axis
+  revolve, and the empty `common`, each at its own operation.
+- **The fillet/chamfer retry accepted the first non-null shape**, which is how
+  that −21025 mm³ result got through. It now requires a sound shape, and shrinks
+  through six halvings instead of four: the radius-50 case now builds a clean
+  789 mm³ solid with a note, where before it produced garbage.
+- **`shell` silently did nothing** when the wall was too thick for the part.
+  A thickness of 25 mm on a 10 mm wall returned the original solid unchanged
+  (16000 mm³, the full volume) and the program carried on believing it had
+  hollowed the part. It is now an error that says so.
+- **Post-build inspection looked at one object.** A program that builds a plate,
+  builds a rib it never references, and fillets the plate finished with a healthy
+  filleted plate and a loose rib in the document that nothing ever examined.
+  `schema.leaf_names()` finds every end product and all of them are now measured.
+
+### Added
+- **Semantic validation for the values OCC accepts and quietly rewrites.**
+  Measured, not assumed: a `cylinder` angle of 0, −30 or 400 all build a full
+  360° cylinder; a `revolve` of 400° builds 40°; a `cone` with radius1 −5 builds
+  one with radius1 0; a profile with a repeated point drops a corner (a
+  four-point square built a triangle, 250 mm³ instead of 500). Also rejects
+  self-intersecting and collinear profiles, and a `torus` whose tube is thicker
+  than its ring. Each error explains what FreeCAD would have done instead.
+  Repeating the first point to close a profile stays legal — OCC tolerates it.
+- **A self-review round.** When the geometry is sound but a measurement
+  disagrees with the request — the largest length the user stated appears
+  nowhere in the built part — the model is shown the request, the measurements
+  and the program, and may either return a correction or sign the build off
+  unchanged. Only the largest stated dimension is checked, and only for a
+  single-part result: a description mixes overall sizes with hole diameters and
+  wall thicknesses, and only the largest is reliably an overall dimension. A
+  clean build that matches the request costs no extra request.
+- **Repair prompts now carry the measurements.** A round told only "the result
+  has zero volume" had to guess which operation was at fault; it can now see
+  that the tool it cut with sits 200 mm from the part it was cutting.
+- **The system prompt states the geometry rules**, including the one that was
+  never written down: every object you create must be used by a later operation
+  or be the final result.
+
+### Changed
+- `interpreter.build_program()` returns `(result, objects, log)`, matching
+  `rebuild()`. Callers need the object map to inspect every end product.
+- 159 unit tests (was 113), including a new `tests/test_panel_flow.py` covering
+  the panel's build → inspect → repair → review decisions — the wiring between
+  the deterministic checks and the model round-trips, which had no tests at all.
+  It binds the real methods to a stand-in object, so it needs no Qt widget and
+  no FreeCAD, only the Qt binding FreeCAD ships; run it with `freecadcmd`.
+- Verified against FreeCAD 1.1 headless: all six built-in templates plus six
+  harder programs (revolve, mirror, shell, chamfer, rotated placement, patterns,
+  partial cylinder, concave extrude) build clean with zero regressions.
+
 ## [2.4.2] - 2026-07-30
 
 Local models get the output guarantee on every server, not just one.

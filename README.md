@@ -68,6 +68,29 @@ Generate **parametric** FreeCAD geometry from plain English — powered by your 
 >   skipped only when *you* press Build on code you can see.
 > - **The local model now unloads with FreeCAD** (and on demand, from Settings), instead of
 >   leaving a multi-gigabyte server resident after the app closes.
+>
+> **New in 2.5 — catching the mistakes that never looked like mistakes:**
+> - **The whole program is inspected, not just the final object.** A plan that builds a
+>   part and leaves a stray solid beside it used to finish "clean", because only the last
+>   operation's result was ever measured. Every end product is now measured, and stray
+>   geometry in a single-part build is reported as the defect it is.
+> - **The values FreeCAD silently rewrites are now rejected.** Measured against FreeCAD 1.1:
+>   a cylinder `angle` of 0, −30 or 400 all build a *full* 360° cylinder; a 400° `revolve`
+>   builds 40°; a cone radius of −5 builds 0; a repeated profile point quietly drops a
+>   corner (a four-point square became a triangle). None of these are errors to the geometry
+>   kernel — they just build the wrong part. Each is now caught before the build, with a
+>   message saying what FreeCAD would have done instead.
+> - **A fillet too big for its edges no longer ships as a finished part.** It returned a
+>   *non-null* self-intersecting solid — −21025 mm³ from a 1000 mm³ box — which passed the
+>   old null-only check. Build results are now checked for validity and positive volume,
+>   per operation, so the error names the step that caused it.
+> - **Repair rounds see the measurements.** Instead of "the result has zero volume", the
+>   model gets the volume and bounding box of every object, so it can see that the tool it
+>   cut with sits 200 mm from the part it was cutting.
+> - **Self-review** — when the geometry is sound but the largest dimension you asked for
+>   appears nowhere in the built part, the model is shown your request alongside the
+>   measurements and may correct it or sign it off. A build that matches your request costs
+>   no extra request.
 
 ---
 
@@ -89,13 +112,23 @@ Generate **parametric** FreeCAD geometry from plain English — powered by your 
 ## How it works
 
 ```
-Your description ──▶ LLM (Gemini/OpenAI/Claude) ──▶ JSON program
+Your description ──▶ LLM (Gemini/OpenAI/Claude/local) ──▶ JSON program
                                                         │
                                           schema.validate_program()  ◀── auto-repair on error
+                                            structure · types · refs
+                                            + geometry the kernel would
+                                              silently accept and get wrong
                                                         │
-                                          interpreter.build_program()
+                                          interpreter.build_program()  ◀── auto-repair on error
+                                            every operation checked for a
+                                            valid, positive-volume result
                                                         │
-                                          parametric FreeCAD feature tree
+                                          inspect: measure every end product ◀── auto-repair
+                                                        │                         on a defect
+                                          review against the request ─────────▶ correct or sign off
+                                                        │                        (only if a
+                                          parametric FreeCAD feature tree         measurement
+                                                                                  disagrees)
 ```
 
 The model is constrained to a small, safe vocabulary of CAD operations (the *IR*). Example
@@ -277,7 +310,8 @@ gpt4freecad/
 │   ├── prompts.py     system prompts + engineering/print addenda         (pure)
 │   ├── templates.py   built-in + user template library (starter programs) (pure)
 │   ├── interpreter.py IR → parametric FreeCAD objects (build + rebuild)   (FreeCAD)
-│   ├── inspect.py     post-build geometry checks (facts + problems)      (pure)
+│   ├── inspect.py     whole-program geometry review: facts, problems,
+│                       measurements, dimension check                     (pure)
 │   ├── export.py      STL/STEP export, bounding box, scale-to-fit (+ pure overage)
 │   └── pyrun.py       advanced Python-mode runner                        (FreeCAD)
 ├── ui/                qt shim · dockable panel · settings · worker       (PySide)
@@ -297,8 +331,21 @@ themselves from that one table — no extra UI code.
 The FreeCAD-free core is fully unit-tested (providers are network-mocked):
 
 ```bash
-python tests/test_core.py     # or: pytest tests/test_core.py
+python tests/test_core.py                # schema, prompts, inspect, providers, config
+python tests/test_interpreter_stubbed.py # interpreter logic, FreeCAD stubbed out
 ```
+
+The panel's build → inspect → repair → review decisions are tested too, by binding the
+real methods to a stand-in object. That needs the Qt binding FreeCAD ships, so it runs
+under FreeCAD's own interpreter (it reports itself skipped anywhere else):
+
+```bash
+"/c/Program Files/FreeCAD 1.1/bin/freecadcmd.exe" tests/test_panel_flow.py
+```
+
+`freecadcmd` is also the way to check real geometry behaviour rather than reason about
+it — the geometry kernel accepts several out-of-range values and quietly builds
+something else, which is how the 2.5 findings turned up.
 
 ## Tips — from the original 2023 release
 

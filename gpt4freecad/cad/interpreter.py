@@ -81,21 +81,60 @@ def _op_error(index, op, objects, exc) -> str:
             f"[operations before it succeeded; objects built so far: {built}]")
 
 
-def _check_built(objects: Dict[str, Any]) -> None:
-    """Raise if any built object ended up with a null shape.
+# Below this (mm^3) a "solid" holds no material.
+_MIN_VOLUME = 1e-6
+
+
+def _shape_defect(shape) -> Optional[str]:
+    """Why a built shape is unusable, or None if it is sound.
+
+    A null shape is the obvious failure, but not the common one. OCC also
+    returns shapes that exist and are wrong: a fillet larger than its edges can
+    take yields a self-intersecting solid with *negative* volume, a
+    self-crossing profile yields a zero-volume solid, a boolean whose operands
+    miss each other yields an empty one. None of those are null, so testing
+    only ``isNull()`` lets them through to be committed as a finished part.
+    """
+    if shape is None:
+        return None
+    if shape.isNull():
+        return "produced no geometry (null shape)"
+    try:
+        if not shape.isValid():
+            return "produced a shape the geometry kernel reports as invalid"
+    except Exception:
+        pass  # a shape that cannot answer is not evidence of a defect
+    try:
+        volume = float(shape.Volume)
+    except Exception:
+        return None
+    if volume < 0:
+        return (f"produced a self-intersecting shape (negative volume, "
+                f"{volume:.4g} mm3)")
+    if volume <= _MIN_VOLUME:
+        return "produced a solid with no volume"
+    return None
+
+
+def _check_built(operations, objects: Dict[str, Any]) -> None:
+    """Raise if any built object ended up with an unusable shape.
 
     Parametric features (Part::Chamfer, Part::Fillet, ...) only compute on
-    doc.recompute(); an OCC failure there leaves a null shape instead of
-    raising, which would otherwise commit a silently-broken step.
+    doc.recompute(), and an OCC failure there leaves a broken shape behind
+    instead of raising. Checking *every* object, not just the last one, means
+    the error names the operation that caused it - the final result of a
+    program can look perfectly healthy while an earlier feature quietly failed.
     """
+    kinds = {op["name"]: op["op"] for op in operations if op.get("name")}
     for ir_name, obj in objects.items():
-        shape = getattr(obj, "Shape", None)
-        if shape is not None and shape.isNull():
-            kind = getattr(obj, "TypeId", "feature").split("::")[-1]
-            raise InterpreterError(
-                f"'{ir_name}' produced no geometry (the {kind} failed to "
-                "compute). Try a smaller size or different edges."
-            )
+        defect = _shape_defect(getattr(obj, "Shape", None))
+        if defect is None:
+            continue
+        kind = kinds.get(ir_name) or getattr(obj, "TypeId", "feature").split("::")[-1]
+        raise InterpreterError(
+            f"'{ir_name}' ({kind}) {defect}. Check that operation's dimensions "
+            "and placement - everything after it is built on top of it."
+        )
 
 
 def _check_booleans(operations, objects: Dict[str, Any]) -> None:
@@ -128,11 +167,14 @@ def _check_booleans(operations, objects: Dict[str, Any]) -> None:
 
 
 def build_program(operations: List[Dict[str, Any]], doc=None,
-                  group_separate: bool = False) -> Tuple[Any, List[str]]:
+                  group_separate: bool = False) -> Tuple[Any, Dict[str, Any], List[str]]:
     """Build ``operations`` into ``doc`` (active document if None).
 
-    Returns ``(result_object, log_lines)``. Validates first. Runs inside one undo
-    transaction so a single Undo reverts the whole program.
+    Returns ``(result_object, objects, log_lines)``, where ``objects`` maps each
+    IR name to the FreeCAD object built for it - the caller needs that to
+    inspect every end product of the program, not just the last one. Validates
+    first. Runs inside one undo transaction so a single Undo reverts the whole
+    program.
     """
     operations = schema.validate_program({"operations": operations})
     if doc is None:
@@ -147,13 +189,13 @@ def build_program(operations: List[Dict[str, Any]], doc=None,
         if group_separate:
             _group_visible_components(doc, objects, log)
         doc.recompute()
-        _check_built(objects)
+        _check_built(operations, objects)
         _check_booleans(operations, objects)
         doc.commitTransaction()
     except Exception as exc:  # noqa: BLE001 - report any build failure cleanly
         doc.abortTransaction()
         raise InterpreterError(str(exc)) from exc
-    return result, log
+    return result, objects, log
 
 
 def rebuild(program: List[Dict[str, Any]], doc=None,
@@ -187,7 +229,7 @@ def rebuild(program: List[Dict[str, Any]], doc=None,
             if group is not None:
                 objects["__assembly__"] = group
         doc.recompute()
-        _check_built(objects)
+        _check_built(program, objects)
         _check_booleans(program, objects)
         doc.commitTransaction()
     except Exception as exc:  # noqa: BLE001
@@ -381,8 +423,14 @@ def _edge_feature(op, doc, objects, type_id, value_key):
     """Build a Part::Fillet/Chamfer, shrinking the value until OCC accepts it.
 
     OCC rejects a radius/size larger than the local geometry allows by leaving
-    a null shape at recompute. Rather than failing the whole build, retry with
+    a broken shape at recompute. Rather than failing the whole build, retry with
     a progressively halved value; only give up when even a tiny value fails.
+
+    "Rejects" is not the same as "leaves null": a radius of 50 on a 10 mm box
+    yields a shape that is not null but is self-intersecting, with a negative
+    volume and a bounding box a hundred times the part. That passed the old
+    null-only test and was committed as the finished result, so the accept
+    condition has to be the full shape check.
     """
     target = objects[op["target"]]
     ids = _edge_ids(op, target)
@@ -392,11 +440,11 @@ def _edge_feature(op, doc, objects, type_id, value_key):
     obj = doc.addObject(type_id, op["name"])
     obj.Base = target
     value = requested
-    for _ in range(4):
+    for _ in range(6):
         obj.Edges = [(i, value, value) for i in ids]
         doc.recompute()
         shape = getattr(obj, "Shape", None)
-        if shape is not None and not shape.isNull():
+        if shape is not None and _shape_defect(shape) is None:
             if value != requested:
                 _note(f"'{op['name']}': {value_key} {requested:g} was too large "
                       f"for the geometry; used {value:g} instead.")
@@ -566,6 +614,19 @@ def _shell(op, doc, objects):
     else:
         chosen = [max(faces, key=lambda f: f.CenterOfMass.z)]  # default: open the top
     shape = base.makeThickness(chosen, -abs(op["thickness"]), 1e-3)
+    # A thickness the part cannot accommodate is not an error to OCC: it hands
+    # back the original solid, so the program carries on believing it hollowed
+    # the part. Measured on FreeCAD 1.1 with thickness 25 on a 10 mm wall.
+    try:
+        if float(shape.Volume) >= float(base.Volume) - 1e-6:
+            raise InterpreterError(
+                f"'{op['name']}' (shell) removed no material from "
+                f"'{op['source']}' - a wall thickness of {op['thickness']:g} is "
+                "too large for this part, so it stayed solid. Use a thinner "
+                "wall or a larger part."
+            )
+    except (AttributeError, TypeError, ValueError):
+        pass  # cannot measure - leave it to the post-build shape check
     obj = _feature(doc, op["name"], shape)
     _hide(src)
     return obj

@@ -393,7 +393,7 @@ def test_a_null_shape_after_recompute_fails_the_build():
     objects = {"chamfered": FakeObject("chamfered", shape=FakeShape(null=True))}
     objects["chamfered"].TypeId = "Part::Chamfer"
     try:
-        interpreter._check_built(objects)
+        interpreter._check_built([], objects)
     except interpreter.InterpreterError as exc:
         assert "chamfered" in str(exc) and "no geometry" in str(exc)
         assert "Chamfer" in str(exc)
@@ -401,8 +401,73 @@ def test_a_null_shape_after_recompute_fails_the_build():
         raise AssertionError("a null shape must fail the build")
 
 
-def test_healthy_shapes_pass_the_null_guard():
-    interpreter._check_built({"ok": FakeObject("ok", shape=FakeShape(volume=1.0))})
+def test_healthy_shapes_pass_the_build_check():
+    interpreter._check_built([], {"ok": FakeObject("ok", shape=FakeShape(volume=1.0))})
+
+
+def test_the_build_check_names_the_operation_that_failed():
+    """The op kind comes from the program, not the FreeCAD TypeId, so the
+    message speaks the model's vocabulary ('cut', not 'Part::Cut')."""
+    ops = [{"op": "cut", "name": "pocket", "base": "a", "tool": "b"}]
+    objects = {"pocket": FakeObject("pocket", shape=FakeShape(volume=0.0))}
+    try:
+        interpreter._check_built(ops, objects)
+    except interpreter.InterpreterError as exc:
+        assert "'pocket' (cut)" in str(exc) and "no volume" in str(exc)
+    else:
+        raise AssertionError("a zero-volume result must fail the build")
+
+
+def test_an_invalid_shape_fails_the_build_even_though_it_is_not_null():
+    """The case that motivated the check: OCC returns a shape, not an error."""
+    objects = {"rounded": FakeObject("rounded", shape=FakeShape(volume=5.0, valid=False))}
+    try:
+        interpreter._check_built([], objects)
+    except interpreter.InterpreterError as exc:
+        assert "rounded" in str(exc) and "invalid" in str(exc)
+    else:
+        raise AssertionError("an invalid shape must fail the build")
+
+
+def test_a_negative_volume_shape_fails_the_build():
+    """A fillet larger than its edges yields a self-intersecting solid whose
+    volume is negative - measured at -21025 mm3 from a 1000 mm3 box."""
+    objects = {"rounded": FakeObject("rounded", shape=FakeShape(volume=-21025.4))}
+    try:
+        interpreter._check_built([], objects)
+    except interpreter.InterpreterError as exc:
+        assert "self-intersecting" in str(exc) and "negative volume" in str(exc)
+    else:
+        raise AssertionError("a negative-volume shape must fail the build")
+
+
+def test_an_oversized_fillet_keeps_shrinking_past_an_invalid_shape():
+    """Shrinking used to stop at the first non-null shape, which is how a
+    -21025 mm3 result got committed as a finished part."""
+    interpreter._drain_notes()
+    doc = FakeDocument()
+    target = FakeObject("body", document=doc, shape=FakeShape(edges=4, volume=10.0))
+    doc.objects["body"] = target
+    real_add = doc.addObject
+
+    def add(type_id, name):
+        obj = real_add(type_id, name)
+        attempts = {"n": 0}
+
+        def on_recompute():
+            attempts["n"] += 1
+            # Attempt 1 is the trap: present, not null, but invalid.
+            obj.Shape = (FakeShape(edges=4, volume=9.0) if attempts["n"] >= 2
+                         else FakeShape(edges=4, volume=-500.0, valid=False))
+
+        obj.on_recompute = on_recompute
+        return obj
+
+    doc.addObject = add
+    op = {"op": "fillet", "name": "rounded", "target": "body", "radius": 8}
+    obj = interpreter._edge_feature(op, doc, {"body": target}, "Part::Fillet", "radius")
+    assert obj.Edges[0] == (1, 4.0, 4.0)  # 8 rejected, 4 accepted
+    assert "used 4" in interpreter._drain_notes()[0]
 
 
 # --------------------------------------------------------------------------- #

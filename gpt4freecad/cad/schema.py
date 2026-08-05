@@ -267,6 +267,183 @@ def _check_placement(op: str, value: Any) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Semantic checks
+#
+# The type checks above reject a program the interpreter cannot execute. These
+# reject one it executes into the *wrong solid*. OCC accepts several
+# out-of-range values without complaint and quietly substitutes its own, so
+# nothing downstream ever notices: measured against FreeCAD 1.1, a cylinder
+# 'angle' of 0, -30 or 400 all build a full 360 cylinder; a revolve of 400
+# degrees builds 40; a cone with radius1 = -5 builds one with radius1 = 0. A
+# profile with a repeated point silently loses a corner (a four-point square
+# became a triangle), and collinear or self-crossing profiles build a
+# zero-volume solid. Catching these here is the only place they can be caught
+# with a message that says what was wrong.
+# --------------------------------------------------------------------------- #
+_POINT_TOL = 1e-7   # OCC's coincident-point tolerance
+_AREA_TOL = 1e-9
+
+
+def _check_sweep_angle(op: Dict[str, Any]) -> None:
+    """A cylinder/revolve 'angle' outside (0, 360] is silently rewritten by OCC."""
+    angle = op.get("angle")
+    if angle is None or not _is_number(angle):
+        return
+    if not 0 < angle <= 360:
+        raise SchemaError(
+            f"operation '{op['op']}', field 'angle' must be > 0 and <= 360 "
+            f"degrees, got {angle}. FreeCAD does not reject an out-of-range "
+            "angle - it silently builds a different shape (0 or a negative "
+            "angle becomes a full revolution, 400 becomes 40). Omit 'angle' "
+            "for a full 360."
+        )
+
+
+def _check_cylinder(op: Dict[str, Any]) -> None:
+    _check_sweep_angle(op)
+
+
+def _check_cone(op: Dict[str, Any]) -> None:
+    for field in ("radius1", "radius2"):
+        value = op.get(field)
+        if _is_number(value) and value < 0:
+            raise SchemaError(
+                f"operation 'cone', field '{field}' must be >= 0, got {value}. "
+                "A negative radius is silently clamped to 0, which builds a "
+                "point-tipped cone instead of the one you described."
+            )
+    if not (op.get("radius1") or op.get("radius2")):
+        raise SchemaError(
+            "operation 'cone' needs at least one non-zero radius; "
+            "radius1 and radius2 are both 0, which builds no geometry."
+        )
+
+
+def _check_torus(op: Dict[str, Any]) -> None:
+    r1, r2 = op.get("radius1"), op.get("radius2")
+    if _is_number(r1) and _is_number(r2) and r2 >= r1:
+        raise SchemaError(
+            f"operation 'torus' needs radius2 < radius1, got radius1={r1}, "
+            f"radius2={r2}. radius1 is the ring radius (centre of the torus to "
+            "centre of the tube) and radius2 is the tube radius, so a tube at "
+            "least as thick as the ring leaves no hole and builds nothing."
+        )
+
+
+def _check_extrude(op: Dict[str, Any]) -> None:
+    problem = _profile_problem(op.get("profile"))
+    if problem:
+        raise SchemaError(f"operation 'extrude', field 'profile': {problem}")
+
+
+def _check_revolve(op: Dict[str, Any]) -> None:
+    _check_sweep_angle(op)
+    profile = op.get("profile")
+    if isinstance(profile, list):
+        for point in profile:
+            if isinstance(point, (list, tuple)) and len(point) == 2 and _is_number(point[0]):
+                if point[0] < 0:
+                    raise SchemaError(
+                        "operation 'revolve', field 'profile': point "
+                        f"{list(point)} has r < 0. r is the distance from the Z "
+                        "axis, so it cannot be negative - keep the whole "
+                        "profile on one side of the axis."
+                    )
+    problem = _profile_problem(profile)
+    if problem:
+        raise SchemaError(f"operation 'revolve', field 'profile': {problem}")
+
+
+_SEMANTIC = {
+    "cylinder": _check_cylinder,
+    "cone": _check_cone,
+    "torus": _check_torus,
+    "extrude": _check_extrude,
+    "revolve": _check_revolve,
+}
+
+
+# --------------------------------------------------------------------------- #
+# 2D profile geometry (pure - the interpreter closes the wire itself)
+# --------------------------------------------------------------------------- #
+def _same_point(a, b) -> bool:
+    return abs(a[0] - b[0]) <= _POINT_TOL and abs(a[1] - b[1]) <= _POINT_TOL
+
+
+def _signed_area(points) -> float:
+    """Shoelace area; near zero means the points enclose nothing."""
+    total = 0.0
+    for i, (x1, y1) in enumerate(points):
+        x2, y2 = points[(i + 1) % len(points)]
+        total += x1 * y2 - x2 * y1
+    return total / 2.0
+
+
+def _sign(value: float) -> int:
+    return 0 if abs(value) <= 1e-12 else (1 if value > 0 else -1)
+
+
+def _turn(a, b, c) -> float:
+    """Cross product of ab x ac - which side of the line ab the point c is on."""
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _crossing(points):
+    """First pair of non-adjacent edges that properly cross, or None.
+
+    Only *proper* crossings count (both pairs strictly straddle), so edges that
+    merely touch at a shared vertex are not reported.
+    """
+    n = len(points)
+    for i in range(n):
+        a, b = points[i], points[(i + 1) % n]
+        for j in range(i + 1, n):
+            if j == i or (j + 1) % n == i or (i + 1) % n == j:
+                continue  # adjacent edges always share a vertex
+            c, d = points[j], points[(j + 1) % n]
+            if (_sign(_turn(c, d, a)) * _sign(_turn(c, d, b)) < 0
+                    and _sign(_turn(a, b, c)) * _sign(_turn(a, b, d)) < 0):
+                return i + 1, j + 1
+    return None
+
+
+def _profile_problem(profile: Any) -> str:
+    """Why this closed polygon cannot become a face, or '' if it is fine."""
+    if not isinstance(profile, list) or len(profile) < 3:
+        return ""  # the type check already reported this
+    try:
+        points = [(float(x), float(y)) for x, y in profile]
+    except (TypeError, ValueError):
+        return ""  # ditto
+
+    # Repeating the first point at the end is harmless - the interpreter closes
+    # the wire itself - so drop it before looking for genuine duplicates.
+    if len(points) > 3 and _same_point(points[0], points[-1]):
+        points = points[:-1]
+
+    for i, point in enumerate(points):
+        nxt = (i + 1) % len(points)
+        if _same_point(point, points[nxt]):
+            return (f"points {i + 1} and {nxt + 1} are both {list(point)}. A "
+                    "repeated point silently drops a corner - give each corner "
+                    "of the outline once, in order.")
+    if len(points) < 3:
+        return "needs at least 3 distinct points."
+    # Self-intersection is tested before the area test, not after: a symmetric
+    # bowtie encloses equal and opposite lobes, so its shoelace area is exactly
+    # zero and the collinear test would otherwise claim the wrong reason.
+    crossed = _crossing(points)
+    if crossed:
+        return (f"edge {crossed[0]} crosses edge {crossed[1]}. The outline must "
+                "be a simple (non-self-intersecting) polygon - list the corners "
+                "in order around the perimeter, clockwise or anticlockwise.")
+    if abs(_signed_area(points)) <= _AREA_TOL:
+        return ("all the points lie on one straight line, so the outline "
+                "encloses no area and builds a zero-volume solid.")
+    return ""
+
+
+# --------------------------------------------------------------------------- #
 # Program validation
 # --------------------------------------------------------------------------- #
 def validate_program(data: Any) -> List[Dict[str, Any]]:
@@ -332,6 +509,10 @@ def _validate_op_fields(op: Any, defined: set, loc: str) -> Dict[str, Any]:
         if field in op and _is_number(op[field]) and op[field] <= 0:
             raise SchemaError(f"operation '{name_op}', field '{field}' must be > 0, got {op[field]}.")
 
+    checker = _SEMANTIC.get(name_op)
+    if checker is not None:
+        checker(op)
+
     for ref_field in spec["refs"]:
         value = op.get(ref_field)
         names = value if isinstance(value, list) else [value]
@@ -352,6 +533,36 @@ def validate_op(op: Dict[str, Any], defined_names=()) -> Dict[str, Any]:
     """
     _validate_op_fields(op, set(defined_names), "operation")
     return op
+
+
+def leaf_names(operations: List[Dict[str, Any]]) -> List[str]:
+    """Objects that no later operation consumes - the program's end products.
+
+    An operation that defines a new object consumes the ones it references: the
+    interpreter (or FreeCAD itself, for ``Part::Cut`` and friends) hides them,
+    so they stop being visible geometry. ``translate``/``rotate`` only move an
+    object and leave it a leaf, as does a pattern with ``keep_source``.
+
+    A single-part program should end with exactly one leaf. Extra leaves are
+    solids left floating in the document - real geometry the user did not ask
+    for, which post-build inspection of the final object alone cannot see.
+    """
+    defined: List[str] = []
+    consumed: set = set()
+    for op in operations or []:
+        spec = OPERATIONS.get(op.get("op"))
+        if spec is None or not spec["defines"]:
+            continue
+        for ref_field in spec["refs"]:
+            if ref_field == "source" and op.get("keep_source"):
+                continue  # deliberately kept visible alongside the pattern
+            value = op.get(ref_field)
+            for name in (value if isinstance(value, list) else [value]):
+                if isinstance(name, str):
+                    consumed.add(name)
+        if isinstance(op.get("name"), str):
+            defined.append(op["name"])
+    return [name for name in defined if name not in consumed]
 
 
 # --------------------------------------------------------------------------- #

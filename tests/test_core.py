@@ -35,6 +35,16 @@ def expect_error(fn, exc=Exception):
     raise AssertionError(f"expected {exc.__name__} but none was raised")
 
 
+def expect_message(fn, exc=Exception):
+    """Like :func:`expect_error`, but returns the message so it can be asserted
+    on - a validation error is only useful if it says the right thing."""
+    try:
+        fn()
+    except exc as caught:
+        return str(caught)
+    raise AssertionError(f"expected {exc.__name__} but none was raised")
+
+
 # --------------------------------------------------------------------------- #
 # schema
 # --------------------------------------------------------------------------- #
@@ -1247,6 +1257,235 @@ def test_config_repair_rounds():
     finally:
         if os.path.exists(path):
             os.remove(path)
+
+
+# --------------------------------------------------------------------------- #
+# schema: semantic checks
+#
+# Every case here was measured against FreeCAD 1.1 first: each one builds
+# without any error and produces geometry that is not what was asked for, so
+# the validator is the only place it can be caught.
+# --------------------------------------------------------------------------- #
+def _op(**kwargs):
+    return {"operations": [kwargs]}
+
+
+def test_a_sweep_angle_outside_one_full_turn_is_rejected():
+    # 0 and -30 both build a full cylinder; 400 builds 40 degrees of one.
+    for angle in (0, -30, 400, 720):
+        expect_error(
+            lambda a=angle: schema.validate_program(
+                _op(op="cylinder", name="c", radius=5, height=10, angle=a)),
+            schema.SchemaError)
+    for angle in (0, -30, 400):
+        expect_error(
+            lambda a=angle: schema.validate_program(
+                _op(op="revolve", name="r", angle=a,
+                    profile=[[2, 0], [8, 0], [8, 4]])),
+            schema.SchemaError)
+
+
+def test_a_sweep_angle_within_one_full_turn_is_accepted():
+    for angle in (0.5, 90, 360):
+        schema.validate_program(_op(op="cylinder", name="c", radius=5,
+                                    height=10, angle=angle))
+    schema.validate_program(_op(op="cylinder", name="c", radius=5, height=10))
+
+
+def test_a_negative_cone_radius_is_rejected():
+    """FreeCAD clamps it to 0 and builds a point-tipped cone instead."""
+    expect_error(
+        lambda: schema.validate_program(
+            _op(op="cone", name="c", radius1=-5, radius2=2, height=10)),
+        schema.SchemaError)
+
+
+def test_a_cone_needs_one_non_zero_radius():
+    expect_error(
+        lambda: schema.validate_program(
+            _op(op="cone", name="c", radius1=0, radius2=0, height=10)),
+        schema.SchemaError)
+    # A single zero radius is a proper point-tipped cone.
+    schema.validate_program(_op(op="cone", name="c", radius1=5, radius2=0, height=10))
+
+
+def test_a_torus_tube_must_be_thinner_than_its_ring():
+    for r2 in (5, 9):
+        expect_error(
+            lambda r=r2: schema.validate_program(
+                _op(op="torus", name="t", radius1=5, radius2=r)),
+            schema.SchemaError)
+    schema.validate_program(_op(op="torus", name="t", radius1=5, radius2=2))
+
+
+def test_a_repeated_profile_point_is_rejected():
+    """It silently drops a corner: a 4-point square built a triangle."""
+    expect_error(
+        lambda: schema.validate_program(
+            _op(op="extrude", name="p", height=5,
+                profile=[[0, 0], [0, 0], [10, 0], [10, 10]])),
+        schema.SchemaError)
+
+
+def test_repeating_the_first_point_to_close_a_profile_is_allowed():
+    """The interpreter closes the wire itself, and OCC tolerates the repeat."""
+    schema.validate_program(
+        _op(op="extrude", name="p", height=5,
+            profile=[[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]))
+
+
+def test_a_collinear_profile_is_rejected():
+    error = expect_message(
+        lambda: schema.validate_program(
+            _op(op="extrude", name="p", height=5,
+                profile=[[0, 0], [5, 0], [10, 0]])))
+    assert "straight line" in error
+
+
+def test_a_self_intersecting_profile_is_rejected_as_such():
+    """A symmetric bowtie has a shoelace area of exactly zero, so the reason
+    has to be found before the collinear test, or it reports the wrong one."""
+    error = expect_message(
+        lambda: schema.validate_program(
+            _op(op="extrude", name="p", height=5,
+                profile=[[0, 0], [10, 10], [10, 0], [0, 10]])))
+    assert "crosses edge" in error
+
+
+def test_an_l_shaped_profile_is_accepted():
+    """Concave outlines are simple polygons and must not be flagged."""
+    schema.validate_program(
+        _op(op="extrude", name="p", height=5,
+            profile=[[0, 0], [30, 0], [30, 10], [10, 10], [10, 25], [0, 25]]))
+
+
+def test_a_revolve_profile_behind_the_axis_is_rejected_before_the_build():
+    expect_error(
+        lambda: schema.validate_program(
+            _op(op="revolve", name="r", profile=[[-2, 0], [8, 0], [8, 4]])),
+        schema.SchemaError)
+
+
+# --------------------------------------------------------------------------- #
+# schema: leaf detection
+# --------------------------------------------------------------------------- #
+def test_leaf_names_finds_the_single_end_product_of_a_program():
+    assert schema.leaf_names(schema.example_program()["operations"]) == ["finished"]
+
+
+def test_leaf_names_exposes_geometry_the_program_left_behind():
+    """The case post-build inspection of the final object cannot see: a
+    healthy filleted plate, plus a rib floating beside it."""
+    ops = [
+        {"op": "box", "name": "plate", "length": 40, "width": 40, "height": 10},
+        {"op": "box", "name": "rib", "length": 5, "width": 5, "height": 5},
+        {"op": "fillet", "name": "done", "target": "plate", "radius": 2},
+    ]
+    assert schema.leaf_names(ops) == ["rib", "done"]
+
+
+def test_translate_does_not_consume_the_object_it_moves():
+    ops = [
+        {"op": "box", "name": "a", "length": 1, "width": 1, "height": 1},
+        {"op": "translate", "target": "a", "vector": [5, 0, 0]},
+    ]
+    assert schema.leaf_names(ops) == ["a"]
+
+
+def test_a_pattern_that_keeps_its_source_leaves_two_end_products():
+    ops = [
+        {"op": "box", "name": "a", "length": 1, "width": 1, "height": 1},
+        {"op": "linear_pattern", "name": "row", "source": "a",
+         "direction": [1, 0, 0], "count": 3, "spacing": 5, "keep_source": True},
+    ]
+    assert schema.leaf_names(ops) == ["a", "row"]
+
+
+# --------------------------------------------------------------------------- #
+# inspect: whole-program review
+# --------------------------------------------------------------------------- #
+def _facts(name, volume=100.0, bbox=(10.0, 10.0, 10.0), solids=1):
+    return {"ir_name": name, "name": name, "null": False, "valid": True,
+            "solids": solids, "closed": True, "volume": volume,
+            "bbox": list(bbox)}
+
+
+def test_program_problems_tags_each_defect_with_its_object():
+    leaves = [_facts("body"), _facts("lug", volume=0.0)]
+    found = ginspect.program_problems(leaves)
+    assert any(p.startswith("'lug'") and "zero" in p for p in found)
+    assert not any(p.startswith("'body'") for p in found)
+
+
+def test_a_single_part_program_with_two_end_products_is_a_defect():
+    found = ginspect.program_problems([_facts("plate"), _facts("rib")],
+                                      expect_single=True)
+    assert any("2 separate solids" in p and "'rib'" in p for p in found)
+    # The same two solids are legitimate in a separate-component layout.
+    assert ginspect.program_problems([_facts("plate"), _facts("rib")]) == []
+
+
+def test_the_measurement_table_reports_what_was_actually_built():
+    table = ginspect.measurement_table([_facts("body", volume=1500.0,
+                                               bbox=(40.0, 20.0, 6.0))])
+    assert "body" in table and "1500.0 mm3" in table
+    assert "40.0 x 20.0 x 6.0 mm" in table
+
+
+def test_inspect_leaves_skips_names_with_no_object():
+    class Obj:
+        Label = "b"
+        Shape = None
+    leaves = ginspect.inspect_leaves({"b": Obj()}, ["a", "b"])
+    assert [f["ir_name"] for f in leaves] == ["b"]
+
+
+# --------------------------------------------------------------------------- #
+# inspect: dimension verification
+# --------------------------------------------------------------------------- #
+def test_stated_dimensions_reads_lengths_and_ignores_quantities():
+    assert ginspect.stated_dimensions("a 100mm bracket with 4 M3 holes") == [100.0]
+    assert ginspect.stated_dimensions("8 cm wide with 2.5mm walls") == [80.0, 2.5]
+    assert ginspect.stated_dimensions('a 2" flange') == [50.8]
+    assert ginspect.stated_dimensions("a bracket with 4 mounting holes") == []
+    assert ginspect.stated_dimensions("8 m5 screws") == []
+
+
+def test_a_part_that_matches_the_request_raises_no_concern():
+    assert ginspect.dimension_check("a 100mm long bracket",
+                                    [_facts("b", bbox=(100.0, 40.0, 6.0))]) is None
+
+
+def test_a_part_that_misses_the_stated_size_raises_a_concern():
+    concern = ginspect.dimension_check("a 250mm long bracket",
+                                       [_facts("b", bbox=(100.0, 40.0, 6.0))])
+    assert "250" in concern and "100.0 x 40.0 x 6.0" in concern
+
+
+def test_dimension_check_stays_quiet_when_it_cannot_be_sure():
+    one = [_facts("b", bbox=(100.0, 40.0, 6.0))]
+    assert ginspect.dimension_check("a bracket", one) is None       # no dimensions
+    assert ginspect.dimension_check("a 250mm bracket", one * 2) is None  # multi-part
+    assert ginspect.dimension_check("a 250mm bracket", []) is None
+
+
+# --------------------------------------------------------------------------- #
+# prompts: repair and review
+# --------------------------------------------------------------------------- #
+def test_the_geometry_repair_prompt_carries_the_measurements():
+    table = ginspect.measurement_table([_facts("tool", bbox=(4.0, 4.0, 5.0))])
+    text = prompts.geometry_repair_prompt("result has zero volume", table)
+    assert "result has zero volume" in text and "tool" in text
+    # Still usable without them, for callers that have none.
+    assert "zero volume" in prompts.geometry_repair_prompt("result has zero volume")
+
+
+def test_the_review_prompt_allows_the_model_to_sign_the_build_off():
+    text = prompts.review_prompt("a 250mm bracket", "no dimension matches",
+                                 "- b: volume 1.0 mm3")
+    assert "a 250mm bracket" in text and "no dimension matches" in text
+    assert "SAME program unchanged" in text
+    assert "review, not a repair" in text
 
 
 # --------------------------------------------------------------------------- #
