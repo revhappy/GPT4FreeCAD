@@ -46,6 +46,22 @@ Every "name" must be UNIQUE across the whole program - never reuse one, not even
 for the finished result. To modify an object, reference its name in a new
 operation with a new name of its own.
 
+GEOMETRY RULES (each of these is checked, and a program that breaks one is sent back):
+- Every object you create must be USED: either a later operation references it, or it is
+  the final result. An object nothing references is left floating in the document as
+  stray geometry - if you build a helper solid, cut or fuse it into the part.
+- Every operation must produce a real solid with volume. A cut whose tool does not
+  overlap its base removes nothing; a tool that swallows the base leaves nothing. Check
+  that the placements you give actually make the two solids intersect.
+- Angles ('angle' on cylinder and revolve) must be greater than 0 and at most 360.
+  Omit the field for a full turn - an out-of-range value silently builds a wrong shape.
+- torus needs radius2 (tube) smaller than radius1 (ring), or there is no hole.
+- cone radii must be >= 0, with at least one greater than 0.
+- A 'profile' must be a simple closed outline: at least 3 DISTINCT corners, listed in
+  order around the perimeter, no point repeated and no edge crossing another. Concave
+  (L-shaped, T-shaped) outlines are fine; figure-eights are not.
+- Keep fillet/chamfer values well under half the thickness of the material they cut into.
+
 AVAILABLE OPERATIONS:
 {schema.operations_reference()}
 
@@ -197,15 +213,48 @@ def step_repair_prompt(description: str, failed_ops, error_message: str) -> str:
     )
 
 
-def geometry_repair_prompt(report: str) -> str:
-    """Follow-up user message asking the model to fix defective built geometry."""
+def geometry_repair_prompt(report: str, measurements: str = "") -> str:
+    """Follow-up user message asking the model to fix defective built geometry.
+
+    ``measurements`` is the per-object table from :mod:`.inspect`. Without it
+    the model is told an outcome ("the result has no volume") and has to guess
+    which operation produced it; with it, it can see that the tool it cut with
+    sits 200 mm from the part it was cutting.
+    """
+    measured = f"What was actually built:\n{measurements}\n\n" if measurements else ""
     return (
         "The JSON program was valid and built without errors, but the resulting "
         "geometry failed inspection:\n\n"
         f"{report}\n\n"
+        f"{measured}"
         "Likely causes: a boolean tool that does not intersect its target, a "
         "misplaced 'placement', a pattern that misses the base solid, or a "
         "fillet/chamfer larger than the local edges allow. Return a corrected "
+        "complete JSON program (object with an 'operations' array) and nothing else."
+    )
+
+
+def review_prompt(request: str, concern: str, measurements: str) -> str:
+    """Ask the model to check a clean build against what was actually asked for.
+
+    This runs only when a measurement disagrees with the request - the geometry
+    is sound, so there is nothing to repair, and the honest answer may well be
+    that the part is correct as built (a stated dimension can be a bolt circle
+    rather than an overall size). Returning the same program is therefore an
+    expected, cheap outcome, and the panel recognises it as a sign-off rather
+    than a failed repair. Asking for a program either way keeps the reply within
+    the same schema, which matters for grammar-constrained local models.
+    """
+    return (
+        "The program built successfully and the geometry is sound, so this is a "
+        "review, not a repair.\n\n"
+        f"The original request was:\n{request}\n\n"
+        f"What was actually built:\n{measurements}\n\n"
+        f"Worth checking: {concern}\n\n"
+        "Decide whether the part as built satisfies the request. If it does - "
+        "for example because the number in question is a feature dimension "
+        "rather than an overall size - reply with the SAME program unchanged. "
+        "If it does not, reply with a corrected one. Either way return a "
         "complete JSON program (object with an 'operations' array) and nothing else."
     )
 

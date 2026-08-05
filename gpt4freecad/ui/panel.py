@@ -40,6 +40,8 @@ class GPTPanel(QtWidgets.QWidget):
         self._last_built = None      # last result object (for Export STL / scale)
         self._worker = None
         self._pending_user = ""
+        self._original_request = ""   # the user's own words, not a repair prompt
+        self._review_of = None        # fingerprint of a program under review
         self._repair = harness.RepairSession(self.cfg.repair_rounds())
         self._loading = True
         self._build_ui()
@@ -543,6 +545,10 @@ class GPTPanel(QtWidgets.QWidget):
             self._set_status("Type a description first.", error=True)
             return
         self._repair.reset(self.cfg.repair_rounds())
+        # Keep the user's own words: every later round sends a repair or review
+        # prompt instead, and the review needs the request it is checking.
+        self._original_request = description
+        self._review_of = None
         self._start_generation(description, log_as_user=True)
 
     def _start_generation(self, user_message, log_as_user=True):
@@ -599,9 +605,22 @@ class GPTPanel(QtWidgets.QWidget):
         self.output_tabs.setCurrentIndex(1)
         self.input.clear()
 
+        payload = result.program if result.program is not None else (result.code or "")
+
+        # A review round asked "is this right?", not "fix this". An unchanged
+        # program is the model signing the build off, so stop here rather than
+        # rebuilding identical geometry.
+        if self._review_of is not None:
+            reviewed, self._review_of = self._review_of, None
+            if harness.fingerprint(payload) == reviewed:
+                self._log_system("The model reviewed the result and confirmed "
+                                 "it matches the request.")
+                self._set_status("Done - reviewed.")
+                return
+            self._log_system("The review returned a revised plan.")
+
         # Loop guard: during a repair round, a plan identical to one that
         # already failed will just fail again - stop instead of burning tokens.
-        payload = result.program if result.program is not None else (result.code or "")
         if self._repair.attempts and self._repair.seen_failure(payload):
             self._log_error(
                 "The model returned the same failing plan again - stopping "
@@ -615,6 +634,9 @@ class GPTPanel(QtWidgets.QWidget):
             self._set_status("Review the plan, then press Build.")
 
     def _on_failed(self, message):
+        # A review that never produced a reply cannot sign anything off; drop it
+        # so a later plan is not mistaken for the reviewed one.
+        self._review_of = None
         self._log_error(message)
         if self._try_plan_repair(message):
             return
@@ -681,7 +703,7 @@ class GPTPanel(QtWidgets.QWidget):
         ops = data.get("operations", data) if isinstance(data, dict) else data
         try:
             ops = schema.validate_program(data)
-            result_obj, log_lines = interpreter.build_program(
+            result_obj, objects, log_lines = interpreter.build_program(
                 ops, group_separate=(self._current_part_layout() == "separate"))
         except (schema.SchemaError, interpreter.InterpreterError) as exc:
             self._handle_build_error(str(exc), failed_payload=ops)
@@ -691,8 +713,9 @@ class GPTPanel(QtWidgets.QWidget):
                 self._log_system(line)
         name = getattr(result_obj, "Label", None) or getattr(result_obj, "Name", "result")
         self._log_system(f"Built {len(log_lines)} step(s). Result object: '{name}'.")
-        problems = self._inspect_built(result_obj)
-        if problems and self._try_geometry_repair(problems, ops):
+
+        leaves, problems = self._inspect_program(ops, objects)
+        if problems and self._try_geometry_repair(problems, ops, leaves):
             return  # defective build undone; a corrected plan is on its way
         if problems:
             self._log_error("Geometry warnings: " + "; ".join(problems))
@@ -700,6 +723,12 @@ class GPTPanel(QtWidgets.QWidget):
         else:
             self._set_status("Done.")
         self._post_build(result_obj, inspected=True)
+        # Finish settling the build (including any bed-fit prompt) before
+        # starting a review request. Sound geometry has nothing to repair, so
+        # only a measurement that disagrees with the request earns a round-trip;
+        # a clean build that matches the request costs nothing.
+        if not problems:
+            self._try_review(ops, leaves)
 
     def _build_python(self, text, user_reviewed=False):
         from ..cad import pyrun  # lazy: needs FreeCAD
@@ -768,7 +797,25 @@ class GPTPanel(QtWidgets.QWidget):
         self._log_system(ginspect.summary(facts))
         return ginspect.problems(facts, expect_single=expect_single)
 
-    def _try_geometry_repair(self, problems, program):
+    def _inspect_program(self, ops, objects):
+        """Inspect every end product of a program, not just the last object.
+
+        Returns ``(leaves, problems)``. The last operation's result can be a
+        perfectly healthy solid while the program has quietly left other solids
+        beside it - those are exactly what inspecting one object cannot see.
+        """
+        from ..cad import inspect as ginspect, schema
+        try:
+            names = schema.leaf_names(ops)
+            leaves = ginspect.inspect_leaves(objects, names)
+        except Exception:
+            return [], []
+        for facts in leaves:
+            self._log_system(ginspect.summary(facts))
+        expect_single = self._current_part_layout() == "fused"
+        return leaves, ginspect.program_problems(leaves, expect_single=expect_single)
+
+    def _try_geometry_repair(self, problems, program, leaves=None):
         """Undo a defective structured build and ask the model for a fix.
 
         Returns True if a repair round-trip was started (shares the repair
@@ -776,6 +823,7 @@ class GPTPanel(QtWidgets.QWidget):
         """
         if self._current_mode() != "structured" or not self._repair.can_retry():
             return False
+        from ..cad import inspect as ginspect
         self._repair.note_failure(program)
         self._repair.start_attempt()
         report = "; ".join(problems)
@@ -789,7 +837,38 @@ class GPTPanel(QtWidgets.QWidget):
             pass
         self._set_status(
             f"Defective geometry - asking the model to fix it (round {self._repair.round_label})…")
-        self._start_generation(prompts.geometry_repair_prompt(report), log_as_user=False)
+        self._start_generation(
+            prompts.geometry_repair_prompt(
+                report, measurements=ginspect.measurement_table(leaves or [])),
+            log_as_user=False)
+        return True
+
+    def _try_review(self, program, leaves):
+        """Ask the model to check a sound build against the original request.
+
+        Fires only when a measurement disagrees with what was asked for, so a
+        build that matches the request costs nothing. Unlike a repair this does
+        not undo anything: the geometry is valid, and the model may well
+        confirm it is correct - :meth:`_on_generated` treats an unchanged
+        program as a sign-off.
+        """
+        if self._current_mode() != "structured" or not self._repair.can_retry():
+            return False
+        if not self._original_request:
+            return False
+        from ..cad import inspect as ginspect
+        concern = ginspect.dimension_check(self._original_request, leaves)
+        if not concern:
+            return False
+        self._review_of = harness.fingerprint(program)
+        self._repair.start_attempt()
+        self._log_system(f"Checking the build against the request: {concern}.")
+        self._set_status(
+            f"Reviewing the result (round {self._repair.round_label})…")
+        self._start_generation(
+            prompts.review_prompt(self._original_request, concern,
+                                  ginspect.measurement_table(leaves)),
+            log_as_user=False)
         return True
 
     def _check_bed_fit(self, obj):

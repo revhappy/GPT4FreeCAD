@@ -18,6 +18,6 @@ Layout::
         workbench.py       Gui.Workbench registration                  (FreeCAD)
 """
 
-__version__ = "2.4.2"
+__version__ = "2.5.0"
 __author__ = "Robb Sharma"
 __all__ = ["__version__"]
