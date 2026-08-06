@@ -3,12 +3,27 @@
 from __future__ import annotations
 
 import os
+from functools import partial
 
 from .qt import QtCore, QtGui, QtWidgets, exec_dialog
+from .model_picker import choose_model
 from .worker import LLMWorker
 from ..config import get_config
 from ..llm import all_providers, get_provider, ChatRequest
 from ..llm.base import LLMError
+
+# Shown instead of an API key field. Keyed by provider id; "" is the fallback.
+_NO_KEY_NOTE = {
+    "machine": ("Runs on this machine — no API key, no cloud, works offline. "
+                "<b>Pick a model below and you're done;</b> GPT4FreeCAD starts "
+                "and stops it for you."),
+    "localserver": ("Uses a model server you are already running — Ollama, LM "
+                    "Studio or anything else speaking the OpenAI API. No key, "
+                    "no cloud, and GPT4FreeCAD does not manage the weights: "
+                    "<b>whatever you have pulled in that app is available "
+                    "here.</b>"),
+    "": "Runs on this machine — no API key, no cloud, works offline.",
+}
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -76,11 +91,7 @@ class SettingsDialog(QtWidgets.QDialog):
             key_wrap.setLayout(key_row)
             form.addRow("API key:", key_wrap)
         else:
-            note = QtWidgets.QLabel(
-                "Runs on this machine — no API key, no cloud, works offline. "
-                "<b>Pick a model file below and you're done;</b> GPT4FreeCAD "
-                "starts and stops it for you."
-            )
+            note = QtWidgets.QLabel(_NO_KEY_NOTE.get(provider.id, _NO_KEY_NOTE[""]))
             note.setWordWrap(True)
             form.addRow("", note)
 
@@ -90,12 +101,20 @@ class SettingsDialog(QtWidgets.QDialog):
             self._machine_model.setToolTip(
                 "The local model to run. GPT4FreeCAD loads it on first use - "
                 "no terminal, no server to start.")
-            browse = QtWidgets.QPushButton("Choose…")
+            find = QtWidgets.QPushButton("Find on this PC…")
+            find.setDefault(False)
+            find.setAutoDefault(False)
+            find.setToolTip(
+                "List the GGUF models already downloaded by LM Studio, GPT4All "
+                "or llama.cpp, so you do not have to remember where they went.")
+            find.clicked.connect(self._pick_local_gguf)
+            browse = QtWidgets.QPushButton("Choose a file…")
             browse.setDefault(False)
             browse.setAutoDefault(False)
             browse.clicked.connect(self._pick_model)
             model_row = QtWidgets.QHBoxLayout()
             model_row.addWidget(self._machine_model, 1)
+            model_row.addWidget(find)
             model_row.addWidget(browse)
             model_wrap = QtWidgets.QWidget()
             model_wrap.setLayout(model_row)
@@ -131,6 +150,24 @@ class SettingsDialog(QtWidgets.QDialog):
             advanced_form.addRow("Server URL:", self._machine_url)
             form.addRow("", advanced)
 
+        if provider.id == "localserver":
+            self._localserver_url = QtWidgets.QLineEdit(
+                self.cfg.localserver_base_url())
+            self._localserver_url.setToolTip(
+                "Where your local server listens. Ollama defaults to port "
+                "11434, LM Studio to 1234.")
+            detect = QtWidgets.QPushButton("Detect")
+            detect.setDefault(False)
+            detect.setAutoDefault(False)
+            detect.setToolTip("Look for a server on the usual ports.")
+            detect.clicked.connect(self._detect_local_servers)
+            url_row = QtWidgets.QHBoxLayout()
+            url_row.addWidget(self._localserver_url, 1)
+            url_row.addWidget(detect)
+            url_wrap = QtWidgets.QWidget()
+            url_wrap.setLayout(url_row)
+            form.addRow("Server URL:", url_wrap)
+
         if provider.id != "machine":
             # The local provider's "model" is the .gguf picked above; a second
             # (empty) catalogue combo would only sit there confusing people.
@@ -139,7 +176,26 @@ class SettingsDialog(QtWidgets.QDialog):
             model_combo.addItems(provider.default_models)
             model_combo.setCurrentText(self.cfg.model(provider.id, provider.default_model))
             self._model_combos[provider.id] = model_combo
-            form.addRow("Model:", model_combo)
+            if provider.can_list_models:
+                # Hard-coded lists go stale; this asks the provider what it
+                # actually has. The combo stays editable either way, so an id
+                # that is too new even for the catalogue can still be typed.
+                browse = QtWidgets.QPushButton("Browse…")
+                browse.setDefault(False)
+                browse.setAutoDefault(False)
+                browse.setToolTip(
+                    f"Fetch the current model list from {provider.label} and "
+                    "search it.")
+                browse.clicked.connect(
+                    lambda _checked=False, p=provider: self._browse_models(p))
+                model_row = QtWidgets.QHBoxLayout()
+                model_row.addWidget(model_combo, 1)
+                model_row.addWidget(browse)
+                model_wrap = QtWidgets.QWidget()
+                model_wrap.setLayout(model_row)
+                form.addRow("Model:", model_wrap)
+            else:
+                form.addRow("Model:", model_combo)
 
         if provider.id == "openai":
             endpoint = QtWidgets.QLineEdit(self.cfg.openai_endpoint())
@@ -240,17 +296,29 @@ class SettingsDialog(QtWidgets.QDialog):
 
     # ------------------------------------------------------------------ #
     def _test(self, provider):
-        if not provider.requires_key:
+        # Only the machine provider has an activation report to show; every
+        # other provider - including the other key-less one - is tested by
+        # actually asking it something.
+        if provider.id == "machine":
             self._test_local(provider)
             return
-        key = self._key_edits[provider.id].text().strip()
+        key = ""
+        if provider.requires_key:
+            key = self._key_edits[provider.id].text().strip()
+            if not key:
+                QtWidgets.QMessageBox.warning(self, "Test", "Enter an API key first.")
+                return
         model = self._model_combos[provider.id].currentText().strip()
-        if not key:
-            QtWidgets.QMessageBox.warning(self, "Test", "Enter an API key first.")
+        if not model:
+            QtWidgets.QMessageBox.warning(
+                self, "Test", "Choose a model first (try Browse… or Detect).")
             return
         if provider.id == "openai" and hasattr(self, "_endpoint_edit"):
             get_provider("openai").endpoint = self._endpoint_edit.text().strip() or \
                 get_provider("openai").endpoint
+        if provider.id == "localserver" and hasattr(self, "_localserver_url"):
+            provider.base_url = (self._localserver_url.text().strip()
+                                 or provider.base_url)
 
         QtWidgets.QApplication.setOverrideCursor(QtGui.QCursor(QtCore.Qt.WaitCursor))
         try:
@@ -351,6 +419,135 @@ class SettingsDialog(QtWidgets.QDialog):
         self._test_worker.finished.connect(progress.close)
         self._test_worker.start()
 
+    def _browse_models(self, provider):
+        """Fetch a provider's live catalogue, then let the user search it.
+
+        The fetch is a network call, so it runs on a worker behind a busy
+        dialog - doing it inline would freeze FreeCAD for as long as the
+        provider takes to answer.
+        """
+        api_key = ""
+        if provider.requires_key:
+            api_key = self._key_edits[provider.id].text().strip()
+        # Providers pick up their endpoint from config at generate time; a
+        # Browse before Save has to use what is on screen instead.
+        if provider.id == "openai" and hasattr(self, "_endpoint_edit"):
+            provider.endpoint = (self._endpoint_edit.text().strip()
+                                 or provider.endpoint)
+        if provider.id == "localserver" and hasattr(self, "_localserver_url"):
+            provider.base_url = (self._localserver_url.text().strip()
+                                 or provider.base_url)
+
+        progress = QtWidgets.QProgressDialog(
+            f"Asking {provider.label} what models it has…", "", 0, 0, self)
+        progress.setCancelButton(None)
+        progress.setWindowTitle("Models")
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        def on_ok(models):
+            if not models:
+                QtWidgets.QMessageBox.warning(
+                    self, "Models", f"{provider.label} returned no models.")
+                return
+            combo = self._model_combos[provider.id]
+            chosen = choose_model(models, current=combo.currentText().strip(),
+                                  title=f"{provider.label} — choose a model",
+                                  parent=self)
+            if not chosen:
+                return
+            if combo.findText(chosen) < 0:
+                combo.insertItem(0, chosen)
+            combo.setCurrentText(chosen)
+
+        def on_fail(message):
+            QtWidgets.QMessageBox.critical(
+                self, "Models",
+                f"Could not list {provider.label} models.\n\n{message}\n\n"
+                "You can still type a model id into the box.")
+
+        self._models_worker = LLMWorker(
+            partial(provider.fetch_models, api_key), self)
+        self._models_worker.succeeded.connect(on_ok)
+        self._models_worker.failed.connect(on_fail)
+        self._models_worker.finished.connect(progress.close)
+        self._models_worker.start()
+
+    def _detect_local_servers(self):
+        """Probe the usual local ports and offer whatever answered."""
+        from ..llm.localserver import discover_servers
+
+        found = discover_servers()
+        if not found:
+            QtWidgets.QMessageBox.information(
+                self, "No server found",
+                "Nothing is listening on the usual ports (Ollama 11434, "
+                "LM Studio 1234, Jan 1337).\n\nStart the app's local server "
+                "and try again, or type the URL yourself.")
+            return
+        if len(found) == 1:
+            label, url, models = found[0]
+        else:
+            choices = [f"{lbl} — {url} ({len(m)} models)" for lbl, url, m in found]
+            picked, ok = QtWidgets.QInputDialog.getItem(
+                self, "Servers found", "Use which server?", choices, 0, False)
+            if not ok:
+                return
+            label, url, models = found[choices.index(picked)]
+        self._localserver_url.setText(url)
+        combo = self._model_combos.get("localserver")
+        if combo is not None and models:
+            current = combo.currentText().strip()
+            combo.clear()
+            combo.addItems(sorted(models))
+            combo.setCurrentText(current if current in models else sorted(models)[0])
+        QtWidgets.QMessageBox.information(
+            self, "Server found",
+            f"{label} at {url} with {len(models)} model(s) installed.")
+
+    def _pick_local_gguf(self):
+        """Offer the GGUF models already downloaded on this machine.
+
+        Browsing the filesystem for a .gguf assumes you remember where the app
+        that downloaded it put it. Usually nobody does.
+        """
+        from ..llm import discovery
+
+        progress = QtWidgets.QProgressDialog(
+            "Looking for models on this computer…", "", 0, 0, self)
+        progress.setCancelButton(None)
+        progress.setWindowTitle("Local models")
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        def on_ok(models):
+            if not models:
+                QtWidgets.QMessageBox.information(
+                    self, "Local models",
+                    "No GGUF models found in the usual places (LM Studio, "
+                    "GPT4All, Hugging Face and llama.cpp caches).\n\n"
+                    "Use “Choose a file…” if yours lives somewhere else.")
+                return
+            labels = [discovery.describe(m) for m in models]
+            picked, ok = QtWidgets.QInputDialog.getItem(
+                self, "Local models",
+                f"{len(models)} model(s) found on this computer:",
+                labels, 0, False)
+            if ok and picked:
+                self._machine_model.setText(models[labels.index(picked)]["path"])
+                self._refresh_machine_status()
+
+        def on_fail(message):
+            QtWidgets.QMessageBox.critical(self, "Local models", message)
+
+        self._scan_worker = LLMWorker(discovery.local_models, self)
+        self._scan_worker.succeeded.connect(on_ok)
+        self._scan_worker.failed.connect(on_fail)
+        self._scan_worker.finished.connect(progress.close)
+        self._scan_worker.start()
+
     def _unload_model(self):
         """Stop a local server this session started and free its memory."""
         from ..llm import local as local_mod
@@ -373,6 +570,8 @@ class SettingsDialog(QtWidgets.QDialog):
             self.cfg.set_model(pid, combo.currentText().strip())
         if hasattr(self, "_endpoint_edit"):
             self.cfg.set_openai_endpoint(self._endpoint_edit.text().strip())
+        if hasattr(self, "_localserver_url"):
+            self.cfg.set_localserver_base_url(self._localserver_url.text())
         self.cfg.set_temperature(self._temp.value())
         self.cfg.set_max_tokens(self._max_tokens.value())
         self.cfg.set_auto_run(self._auto_run.isChecked())

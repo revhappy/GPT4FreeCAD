@@ -1,5 +1,67 @@
 # GPT4FreeCAD Changelog
 
+## [2.6.0] - 2026-08-05
+
+Model lists stop being a Python literal.
+
+Every provider carried a hard-coded `default_models` list, so a model released
+after the last commit was invisible until somebody edited the source. That is
+the wrong shape for a thing that changes weekly. Providers are now asked what
+they have.
+
+### Added
+- **Live model catalogues.** `Provider.fetch_models()` queries the provider's
+  own model endpoint; `default_models` is demoted to the offline fallback it
+  always should have been. Implemented for OpenAI (`/v1/models`, filtered to
+  models that can hold a conversation and sorted newest first), Anthropic
+  (`/v1/models`), Gemini (`/v1beta/models`, keeping only models that support
+  `generateContent`) and OpenRouter.
+- **A searchable model picker** (`ui/model_picker.py`). **Browse…** beside any
+  Model box fetches the catalogue on a worker thread and opens a filterable
+  table: id, context length, price per million in/out, and whether the model
+  accepts a JSON response. Space-separated filter words all have to match, so
+  "qwen coder" finds `qwen/qwen3-coder` without an exact prefix. Free-only and
+  JSON-capable toggles; the latter is on by default, because structured mode
+  asks every model for JSON and one that cannot be asked will fail every
+  generation. The combo stays editable for ids newer than the catalogue.
+- **OpenRouter provider.** One key for the whole ecosystem — 340 models when
+  this was written, most of them released after any list this addon could ship
+  with. The catalogue endpoint is public, so the picker works before a key is
+  pasted. Sends the documented attribution headers, and translates OpenRouter's
+  habit of reporting routing failures as HTTP 200 with an `error` member into a
+  real error instead of a confusing "no choices".
+- **Ollama / LM Studio provider** (`llm/localserver.py`). Attaches to a local
+  OpenAI-compatible server you are already running, so anything pulled in those
+  apps is usable without this addon managing weights, ports or processes.
+  **Detect** probes the usual ports (Ollama 11434, LM Studio 1234, Jan 1337).
+  URLs are normalised, so pasting `:11434`, `/v1` or the full chat-completions
+  path all work. Distinct from the existing `machine` provider, which downloads
+  and supervises a llama-server itself.
+- **"Find on this PC…"** (`llm/discovery.py`). Lists GGUF models already
+  downloaded by LM Studio, GPT4All, Hugging Face or llama.cpp rather than
+  asking you to remember where that app put them. Skips what a `.gguf` walk
+  otherwise turns up and cannot chat: `mmproj-*` multimodal projectors,
+  embedding and reranker models, files under 100 MB, and every shard of a split
+  model but the first. Ollama is deliberately not scanned — it stores weights as
+  extensionless blobs, and its models are better reached through the provider
+  above.
+
+### Fixed
+- The Test button called the local provider's activation report for *any*
+  key-less provider, which would have failed with an AttributeError once a
+  second key-less provider existed. It now dispatches on the provider, and
+  key-less providers get a real chat round-trip.
+- The panel's model dropdown was populated only from `default_models`, so a
+  provider whose models all come from a live catalogue would show an empty box
+  even with a model configured. A saved model is now always present.
+
+### Changed
+- Provider registration order is now the display order, with Gemini first to
+  match the default.
+- 181 unit tests (was 159), covering catalogue parsing for all four cloud
+  providers from trimmed real fixtures, local-server URL normalisation and
+  error messages, and the discovery filters.
+
 ## [2.5.0] - 2026-08-05
 
 Catches the failures that never looked like failures.

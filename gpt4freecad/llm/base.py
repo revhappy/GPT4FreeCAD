@@ -141,6 +141,36 @@ def _post_once(url: str, body: bytes, headers: Dict[str, str], timeout: int) -> 
         raise LLMError(f"Could not parse provider response as JSON: {exc}") from exc
 
 
+def http_get_json(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 30,
+) -> dict:
+    """GET ``url`` and return the parsed JSON response.
+
+    Same error translation as :func:`http_post_json`, without the retries -
+    every caller is a catalogue lookup that has a usable fallback, so a slow
+    failure is worse than a fast one.
+    """
+    request = urllib.request.Request(url, headers=headers or {}, method="GET")
+    try:
+        with urllib.request.urlopen(
+            request, timeout=timeout, context=ssl.create_default_context()
+        ) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = _read_error_body(exc)
+        if exc.code in (401, 403):
+            raise AuthError(f"HTTP {exc.code}: {detail}") from exc
+        raise LLMError(f"HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        error = LLMError(f"Network error: {exc.reason}")
+        error.transient = True
+        raise error from exc
+    except json.JSONDecodeError as exc:
+        raise LLMError(f"Could not parse response as JSON: {exc}") from exc
+
+
 def _read_error_body(exc: urllib.error.HTTPError) -> str:
     try:
         raw = exc.read().decode("utf-8", errors="replace")
@@ -234,6 +264,54 @@ def _first_balanced_object(text: str) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
+# Model catalogue
+# --------------------------------------------------------------------------- #
+@dataclass
+class ModelInfo:
+    """One model in a provider's live catalogue.
+
+    Only ``id`` is guaranteed; a provider that reports nothing else still
+    produces a usable entry. ``json_mode`` is the field that matters most here -
+    structured mode is the whole point of this addon, and a model that cannot be
+    asked for JSON will fail every time.
+    """
+
+    id: str
+    name: str = ""
+    context: int = 0
+    price_in: float = 0.0      # USD per million input tokens
+    price_out: float = 0.0     # USD per million output tokens
+    json_mode: bool = True     # provider says it accepts a JSON/schema request
+    free: bool = False
+
+    @property
+    def label(self) -> str:
+        return self.name or self.id
+
+    def matches(self, needle: str) -> bool:
+        """Case-insensitive match over id and display name, for the picker."""
+        needle = (needle or "").strip().lower()
+        if not needle:
+            return True
+        return all(word in f"{self.id} {self.name}".lower()
+                   for word in needle.split())
+
+
+def price_per_million(raw: Any) -> float:
+    """USD per million tokens from a provider's per-token price string.
+
+    Providers quote per-token prices as strings ("0.00000125"), and use -1 to
+    mean "variable". Anything unparseable becomes 0.0, which the picker shows
+    as free rather than inventing a number.
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return value * 1_000_000 if value > 0 else 0.0
+
+
+# --------------------------------------------------------------------------- #
 # Provider base + registry
 # --------------------------------------------------------------------------- #
 class Provider:
@@ -247,6 +325,10 @@ class Provider:
     api_key_url: str = ""
     default_models: List[str] = []
     requires_key: bool = True
+    # True when fetch_models() can reach a live catalogue. Providers whose
+    # models only ever come from default_models leave this False so the UI
+    # does not offer a Browse button that can only disappoint.
+    can_list_models: bool = False
 
     @property
     def default_model(self) -> str:
@@ -255,6 +337,17 @@ class Provider:
     def chat(self, request: ChatRequest, api_key: str) -> str:
         """Run a chat completion and return the assistant text content."""
         raise NotImplementedError
+
+    def fetch_models(self, api_key: str = "") -> List[ModelInfo]:
+        """The provider's live model catalogue.
+
+        Hard-coded lists go stale the moment a provider ships something, which
+        is exactly when you want to use it. Every adapter that can ask its
+        provider what exists does so; :attr:`default_models` is the offline
+        fallback, not the source of truth. Raises :class:`LLMError` on failure
+        so the caller can tell "nothing available" from "could not reach it".
+        """
+        raise LLMError(f"{self.label} has no model catalogue to list.")
 
 
 _REGISTRY: "dict[str, Provider]" = {}

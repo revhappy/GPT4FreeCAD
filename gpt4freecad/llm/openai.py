@@ -6,9 +6,21 @@ servers) by overriding the base URL in Settings.
 
 from __future__ import annotations
 
-from .base import ChatRequest, LLMError, Provider, http_post_json, register
+from typing import List
+
+from .base import (
+    ChatRequest, LLMError, ModelInfo, Provider, http_get_json, http_post_json,
+    register,
+)
 
 _DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+
+# /v1/models lists everything on the account, most of which cannot hold a
+# conversation. There is no "modality" field to filter on, so the exclusions are
+# by name - wrong only if OpenAI ships a chat model named after a speech codec.
+_NOT_CHAT = ("embed", "tts", "whisper", "dall-e", "moderation", "audio",
+             "image", "realtime", "transcribe", "search", "babbage", "davinci",
+             "sora", "guard")
 
 # Reasoning models (gpt-5.x, o-series) differ from the gpt-4 family in three
 # ways this adapter must honour: they take `max_completion_tokens` instead of
@@ -37,6 +49,24 @@ class OpenAIProvider(Provider):
     ]
     # Optional override for OpenAI-compatible gateways; set by config at runtime.
     endpoint = _DEFAULT_ENDPOINT
+    can_list_models = True
+
+    def models_url(self) -> str:
+        """/v1/models alongside whatever chat endpoint is configured."""
+        base = (self.endpoint or _DEFAULT_ENDPOINT).split("/chat/completions")[0]
+        return f"{base.rstrip('/')}/models"
+
+    def fetch_models(self, api_key: str = "") -> List[ModelInfo]:
+        if not api_key:
+            raise LLMError("An OpenAI API key is needed to list models.")
+        data = http_get_json(self.models_url(),
+                             headers={"Authorization": f"Bearer {api_key}"})
+        entries = [e for e in data.get("data", []) if e.get("id")]
+        # Newest first: the reason for asking at all is to find what just shipped.
+        entries.sort(key=lambda e: e.get("created") or 0, reverse=True)
+        return [ModelInfo(id=e["id"], name=e["id"])
+                for e in entries
+                if not any(word in e["id"].lower() for word in _NOT_CHAT)]
 
     def chat(self, request: ChatRequest, api_key: str) -> str:
         if not api_key:

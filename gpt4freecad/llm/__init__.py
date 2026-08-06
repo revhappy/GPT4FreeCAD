@@ -14,29 +14,36 @@ and calling :func:`register`. Importing this package registers the built-ins.
 
 from .base import (
     ChatRequest,
+    ModelInfo,
     Provider,
     LLMError,
     AuthError,
     RateLimitError,
     extract_json,
+    price_per_million,
     register,
     get_provider,
     all_providers,
 )
 
 # Importing the modules registers the providers via the @register decorator.
+# Registration order is the order they appear in the UI.
+from . import gemini as _gemini  # noqa: F401
 from . import openai as _openai  # noqa: F401
 from . import anthropic as _anthropic  # noqa: F401
-from . import gemini as _gemini  # noqa: F401
+from . import openrouter as _openrouter  # noqa: F401
 from . import local as _local  # noqa: F401
+from . import localserver as _localserver  # noqa: F401
 
 __all__ = [
     "ChatRequest",
+    "ModelInfo",
     "Provider",
     "LLMError",
     "AuthError",
     "RateLimitError",
     "extract_json",
+    "price_per_million",
     "register",
     "get_provider",
     "all_providers",

@@ -8,6 +8,7 @@ Run with either::
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 
@@ -19,12 +20,13 @@ from gpt4freecad.cad import inspect as ginspect
 from gpt4freecad.config import Config, _JsonBackend
 from gpt4freecad import engine, harness, util
 from gpt4freecad.llm import (
-    all_providers, get_provider, extract_json, ChatRequest, LLMError,
+    all_providers, get_provider, extract_json, ChatRequest, LLMError, ModelInfo,
 )
 from gpt4freecad.llm import openai as openai_mod
 from gpt4freecad.llm import anthropic as anthropic_mod
 from gpt4freecad.llm import gemini as gemini_mod
 from gpt4freecad.llm import local as local_mod
+from gpt4freecad.llm import openrouter as openrouter_mod
 
 
 def expect_error(fn, exc=Exception):
@@ -1486,6 +1488,261 @@ def test_the_review_prompt_allows_the_model_to_sign_the_build_off():
     assert "a 250mm bracket" in text and "no dimension matches" in text
     assert "SAME program unchanged" in text
     assert "review, not a repair" in text
+
+
+# --------------------------------------------------------------------------- #
+# model catalogues
+#
+# Hard-coded model lists go stale the moment a provider ships something new,
+# which is exactly when you want it. These cover the parsing of each provider's
+# live catalogue; the fixtures are trimmed copies of real responses.
+# --------------------------------------------------------------------------- #
+def _patch_get(mod, response):
+    captured = {}
+
+    def fake(url, headers=None, timeout=30):
+        captured["url"] = url
+        captured["headers"] = headers or {}
+        return response
+
+    mod.http_get_json = fake
+    return captured
+
+
+def test_every_provider_declares_whether_it_can_list_models():
+    for provider in all_providers():
+        assert isinstance(provider.can_list_models, bool)
+        assert provider.label and provider.id
+
+
+def test_a_provider_without_a_catalogue_says_so():
+    from gpt4freecad.llm.base import Provider
+
+    expect_error(lambda: Provider().fetch_models("k"), LLMError)
+
+
+def test_model_info_filters_on_id_and_name():
+    m = ModelInfo(id="qwen/qwen3-coder", name="Qwen3 Coder")
+    assert m.matches("") and m.matches("qwen") and m.matches("coder")
+    assert m.matches("qwen coder")      # all words must match, any order
+    assert m.matches("CODER QWEN")
+    assert not m.matches("llama")
+    assert not m.matches("qwen llama")
+
+
+def test_per_token_prices_become_per_million():
+    from gpt4freecad.llm import price_per_million
+
+    assert price_per_million("0.00000125") == 1.25
+    assert price_per_million("0") == 0.0
+    assert price_per_million("-1") == 0.0     # provider-speak for "variable"
+    assert price_per_million(None) == 0.0
+    assert price_per_million("nonsense") == 0.0
+
+
+def test_openrouter_catalogue_is_parsed_with_price_and_capability():
+    captured = _patch_get(openrouter_mod, {"data": [
+        {"id": "qwen/qwen3-coder", "name": "Qwen3 Coder",
+         "context_length": 262144,
+         "pricing": {"prompt": "0.0000003", "completion": "0.0000012"},
+         "supported_parameters": ["response_format", "tools"],
+         "architecture": {"output_modalities": ["text"]}},
+        {"id": "meta/free-thing", "name": "Free Thing", "context_length": 8192,
+         "pricing": {"prompt": "0", "completion": "0"},
+         "supported_parameters": [],
+         "architecture": {"output_modalities": ["text"]}},
+        {"id": "someone/image-only", "name": "Image", "context_length": 4096,
+         "pricing": {"prompt": "0.001", "completion": "0.001"},
+         "architecture": {"output_modalities": ["image"]}},
+    ]})
+    models = get_provider("openrouter").fetch_models()
+    # The image-only model cannot return a CAD program, so it is dropped.
+    assert [m.id for m in models] == ["meta/free-thing", "qwen/qwen3-coder"]
+    coder = models[1]
+    assert coder.context == 262144 and coder.json_mode is True
+    assert round(coder.price_in, 3) == 0.3 and round(coder.price_out, 3) == 1.2
+    assert coder.free is False
+    free = models[0]
+    assert free.free is True and free.json_mode is False
+    assert "openrouter.ai" in captured["url"]
+
+
+def test_openrouter_needs_no_key_to_list_models():
+    """The catalogue endpoint is public - browsing before pasting a key works."""
+    _patch_get(openrouter_mod, {"data": []})
+    assert get_provider("openrouter").fetch_models() == []
+    assert get_provider("openrouter").fetch_models("") == []
+
+
+def test_openrouter_reports_a_routing_error_returned_as_http_200():
+    _patch(openrouter_mod, {"error": {"message": "no allowed provider"}})
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}], model="x/y")
+    error = expect_message(lambda: get_provider("openrouter").chat(req, "k"), LLMError)
+    assert "no allowed provider" in error
+
+
+def test_openrouter_sends_attribution_and_json_mode():
+    captured = _patch(openrouter_mod, {"choices": [{"message": {"content": "ok"}}]})
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}],
+                      model="qwen/qwen3-coder", json_mode=True)
+    assert get_provider("openrouter").chat(req, "sk-or") == "ok"
+    assert captured["headers"]["Authorization"] == "Bearer sk-or"
+    assert captured["headers"]["X-Title"] == "GPT4FreeCAD"
+    assert captured["payload"]["response_format"] == {"type": "json_object"}
+
+
+def test_openai_catalogue_drops_everything_that_cannot_chat():
+    _patch_get(openai_mod, {"data": [
+        {"id": "gpt-5.1", "created": 300},
+        {"id": "text-embedding-3-large", "created": 200},
+        {"id": "whisper-1", "created": 100},
+        {"id": "dall-e-3", "created": 50},
+        {"id": "gpt-4o", "created": 400},
+    ]})
+    models = get_provider("openai").fetch_models("sk-test")
+    # Newest first - the point of asking is to find what just shipped.
+    assert [m.id for m in models] == ["gpt-4o", "gpt-5.1"]
+
+
+def test_openai_catalogue_follows_the_endpoint_override():
+    """A gateway's model list lives next to its chat endpoint, not OpenAI's."""
+    provider = get_provider("openai")
+    original = provider.endpoint
+    try:
+        provider.endpoint = "https://gateway.example/v1/chat/completions"
+        assert provider.models_url() == "https://gateway.example/v1/models"
+    finally:
+        provider.endpoint = original
+
+
+def test_openai_catalogue_needs_a_key():
+    expect_error(lambda: get_provider("openai").fetch_models(""), LLMError)
+
+
+def test_anthropic_catalogue_keeps_display_names():
+    captured = _patch_get(anthropic_mod, {"data": [
+        {"id": "claude-opus-5", "display_name": "Claude Opus 5"},
+        {"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"},
+    ]})
+    models = get_provider("anthropic").fetch_models("sk-ant")
+    assert [m.id for m in models] == ["claude-opus-5", "claude-sonnet-5"]
+    assert models[0].name == "Claude Opus 5"
+    assert captured["headers"]["x-api-key"] == "sk-ant"
+    assert captured["headers"]["anthropic-version"]
+
+
+def test_gemini_catalogue_keeps_only_models_that_generate_content():
+    _patch_get(gemini_mod, {"models": [
+        {"name": "models/gemini-3.5-flash", "displayName": "Gemini 3.5 Flash",
+         "inputTokenLimit": 1048576,
+         "supportedGenerationMethods": ["generateContent", "countTokens"]},
+        {"name": "models/text-embedding-004", "displayName": "Embedding",
+         "supportedGenerationMethods": ["embedContent"]},
+    ]})
+    models = get_provider("gemini").fetch_models("key")
+    assert [m.id for m in models] == ["gemini-3.5-flash"]
+    assert models[0].context == 1048576
+
+
+# --------------------------------------------------------------------------- #
+# local server (Ollama / LM Studio)
+# --------------------------------------------------------------------------- #
+def test_a_local_server_url_is_normalised_however_it_was_pasted():
+    from gpt4freecad.llm.localserver import _v1
+
+    for given in ("http://127.0.0.1:11434",
+                  "http://127.0.0.1:11434/",
+                  "http://127.0.0.1:11434/v1",
+                  "http://127.0.0.1:11434/v1/chat/completions"):
+        assert _v1(given) == "http://127.0.0.1:11434/v1"
+
+
+def test_a_local_server_that_is_not_running_explains_itself():
+    from gpt4freecad.llm import localserver as ls
+
+    def boom(url, headers=None, timeout=30):
+        raise LLMError("Network error: connection refused")
+
+    ls.http_get_json = boom
+    error = expect_message(lambda: get_provider("localserver").fetch_models(), LLMError)
+    assert "No server responding" in error and "ollama" in error.lower()
+
+
+def test_a_local_server_with_no_models_says_to_pull_one():
+    from gpt4freecad.llm import localserver as ls
+
+    ls.http_get_json = lambda url, headers=None, timeout=30: {"data": []}
+    error = expect_message(lambda: get_provider("localserver").fetch_models(), LLMError)
+    assert "no models" in error and "pull" in error
+
+
+def test_a_local_server_lists_what_it_has():
+    from gpt4freecad.llm import localserver as ls
+
+    ls.http_get_json = lambda url, headers=None, timeout=30: {
+        "data": [{"id": "qwen3-coder:30b"}, {"id": "gemma-4:12b"}]}
+    models = get_provider("localserver").fetch_models()
+    assert [m.id for m in models] == ["gemma-4:12b", "qwen3-coder:30b"]
+
+
+# --------------------------------------------------------------------------- #
+# finding GGUF models already on the machine
+# --------------------------------------------------------------------------- #
+def test_projectors_and_embedding_models_are_not_chat_models():
+    from gpt4freecad.llm.discovery import _looks_like_chat_model
+
+    assert _looks_like_chat_model("Qwen3.5-9B-Q4_K_M.gguf")
+    # Real files sitting next to real models in an LM Studio library.
+    assert not _looks_like_chat_model("mmproj-Qwen3.5-9B-BF16.gguf")
+    assert not _looks_like_chat_model("nomic-embed-text-v1.5.Q4_K_M.gguf")
+    assert not _looks_like_chat_model("model.safetensors")
+
+
+def test_only_the_first_shard_of_a_split_model_is_offered():
+    from gpt4freecad.llm.discovery import _split_shard
+
+    assert _split_shard("Big-Q4-00001-of-00003.gguf") == "Big-Q4"
+    assert _split_shard("Big-Q4-00002-of-00003.gguf") == "Big-Q4"
+    assert _split_shard("Plain-Q4.gguf") is None
+
+
+def test_scanning_finds_models_and_skips_the_noise():
+    from gpt4freecad.llm import discovery
+
+    root = tempfile.mkdtemp()
+    try:
+        nested = os.path.join(root, "org", "repo")
+        os.makedirs(nested)
+        big = b"x" * (200 * 1024 * 1024)
+        for name, blob in (("Good-Q4_K_M.gguf", big),
+                           ("mmproj-F32.gguf", big),
+                           ("tiny-adapter.gguf", b"x" * 1024),
+                           ("Split-00001-of-00002.gguf", big),
+                           ("Split-00002-of-00002.gguf", big)):
+            with open(os.path.join(nested, name), "wb") as fh:
+                fh.write(blob)
+        found = discovery.scan_roots([(root, "Test")])
+        names = sorted(m["name"] for m in found)
+        assert names == ["Good-Q4_K_M", "Split-00001-of-00002"]
+        assert all(m["source"] == "Test" and m["size_mb"] >= 100 for m in found)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_found_model_reads_as_a_size_and_a_source():
+    from gpt4freecad.llm import discovery
+
+    assert discovery.describe(
+        {"name": "Qwen3.5-9B-Q4_K_M", "size_mb": 5324, "source": "LM Studio"}
+    ) == "Qwen3.5-9B-Q4_K_M  (5.2 GB, LM Studio)"
+    assert "236 MB" in discovery.describe(
+        {"name": "Bonsai-1.7B-Q1_0", "size_mb": 236, "source": "LM Studio"})
+
+
+def test_scanning_a_missing_directory_is_not_an_error():
+    from gpt4freecad.llm import discovery
+
+    assert discovery.scan_roots([("/definitely/not/here", "Nope")]) == []
 
 
 # --------------------------------------------------------------------------- #

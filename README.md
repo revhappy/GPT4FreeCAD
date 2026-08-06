@@ -91,6 +91,26 @@ Generate **parametric** FreeCAD geometry from plain English — powered by your 
 >   appears nowhere in the built part, the model is shown your request alongside the
 >   measurements and may correct it or sign it off. A build that matches your request costs
 >   no extra request.
+>
+> **New in 2.6 — every model, not a shortlist someone hard-coded:**
+> - **Model lists come from the provider, live.** Every list in this addon used to be a
+>   Python literal, so a model released on Tuesday was invisible until someone edited the
+>   source. **Browse…** next to any Model box fetches the provider's current catalogue and
+>   opens a searchable table with context length, price per million tokens, and whether the
+>   model can actually be asked for JSON. The box stays editable, so an id too new even for
+>   the catalogue still works.
+> - **OpenRouter** — one key for several hundred models across every major lab and the whole
+>   open-weight ecosystem. Its catalogue is public, so you can browse the full list *before*
+>   pasting a key. Free models are flagged and filterable.
+> - **Ollama / LM Studio** — point at a server you are already running and use whatever you
+>   have pulled there. No key, no cloud, and GPT4FreeCAD does not manage the weights.
+>   **Detect** finds it on the usual ports (Ollama 11434, LM Studio 1234, Jan 1337).
+> - **"Find on this PC…"** — lists the GGUF models already downloaded by LM Studio, GPT4All
+>   or llama.cpp instead of making you remember where that app put them. Multimodal
+>   projectors, embedding models and the tail shards of split models are filtered out, so
+>   the list is only things that can actually hold a conversation.
+> - **Structured mode filters for it.** The picker defaults to models that support a JSON
+>   response, because a model that cannot be asked for one fails every single generation.
 
 ---
 
@@ -98,7 +118,7 @@ Generate **parametric** FreeCAD geometry from plain English — powered by your 
 
 | | v1 (2023) | v2 (this) |
 |---|---|---|
-| Providers | OpenAI only | **Gemini, OpenAI, Claude, or a local model** (pluggable) |
+| Providers | OpenAI only | **Gemini, OpenAI, Claude, OpenRouter, or either kind of local model** (pluggable) |
 | Model choice | hard-coded `gpt-4` | per-provider, editable dropdowns |
 | Output | raw `exec()` of model text | **validated structured IR** → parametric objects, *or* opt-in Python mode |
 | Keys | plaintext `~/api_key.txt` | FreeCAD preferences, per provider, password-masked |
@@ -302,9 +322,11 @@ gpt4freecad/
 ├── engine.py          orchestration: prompt → LLM → validated program / step   (pure)
 ├── util.py            small shared helpers                               (pure)
 ├── llm/               provider abstraction                               (pure)
-│   ├── base.py        Provider ABC, HTTP, JSON extraction, registry
-│   ├── gemini.py  ·  openai.py  ·  anthropic.py
+│   ├── base.py        Provider ABC, HTTP, JSON extraction, ModelInfo, registry
+│   ├── gemini.py  ·  openai.py  ·  anthropic.py  ·  openrouter.py
 │   ├── local.py       Machine Activation SDK: local GGUF models, no key
+│   ├── localserver.py Ollama / LM Studio: attach to a server you already run
+│   ├── discovery.py   find GGUF models already downloaded on this PC   (pure)
 ├── cad/
 │   ├── schema.py      CAD operation IR: validation + JSON schema         (pure)
 │   ├── prompts.py     system prompts + engineering/print addenda         (pure)
@@ -317,7 +339,8 @@ gpt4freecad/
 ├── ui/                qt shim · dockable panel · settings · worker       (PySide)
 │   ├── panel.py       header, mode stack, casual + 3D-print controls
 │   ├── engineering.py step-timeline widget (the feature history)
-│   └── op_form.py     schema-driven parameter form (one editor per field)
+│   ├── op_form.py     schema-driven parameter form (one editor per field)
+│   └── model_picker.py searchable model table (filter, price, JSON support)
 └── workbench.py       Gui.Workbench + commands                          (FreeCAD)
 ```
 

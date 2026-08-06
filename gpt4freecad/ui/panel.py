@@ -308,10 +308,18 @@ class GPTPanel(QtWidgets.QWidget):
             self.model_combo.setToolTip(
                 path or "Open Settings (…) and choose a .gguf model file.")
         else:
-            self.model_combo.addItems(provider.default_models)
-            self.model_combo.setCurrentText(
-                self.cfg.model(provider.id, provider.default_model))
-            self.model_combo.setToolTip("Model")
+            saved = self.cfg.model(provider.id, provider.default_model)
+            items = list(provider.default_models)
+            # A provider whose models all come from a live catalogue (Ollama /
+            # LM Studio) ships no defaults, so without this the dropdown would
+            # be empty even though a model is configured.
+            if saved and saved not in items:
+                items.insert(0, saved)
+            self.model_combo.addItems(items)
+            self.model_combo.setCurrentText(saved)
+            self.model_combo.setToolTip(
+                "Model — pick a different one in Settings (…)"
+                if provider.can_list_models else "Model")
         self.model_combo.blockSignals(False)
 
     def _any_key_set(self) -> bool:
@@ -506,6 +514,8 @@ class GPTPanel(QtWidgets.QWidget):
         provider = self._current_provider()
         if provider.id == "openai":
             provider.endpoint = self.cfg.openai_endpoint()
+        if provider.id == "localserver":
+            provider.base_url = self.cfg.localserver_base_url()
         model = self.model_combo.currentText().strip()
         if provider.id == "machine":
             provider.base_url = self.cfg.machine_base_url()

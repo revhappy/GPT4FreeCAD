@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from .base import ChatRequest, LLMError, Provider, http_post_json, register
+from typing import List
+
+from .base import (
+    ChatRequest, LLMError, ModelInfo, Provider, http_get_json, http_post_json,
+    register,
+)
 
 _BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
@@ -46,6 +51,26 @@ class GeminiProvider(Provider):
         "gemini-3-flash-preview",   # Gemini 3 Flash (preview)
         "gemini-3.1-pro-preview",   # Gemini 3.1 Pro (preview)
     ]
+    can_list_models = True
+
+    def fetch_models(self, api_key: str = "") -> List[ModelInfo]:
+        if not api_key:
+            raise LLMError("A Gemini API key is needed to list models.")
+        data = http_get_json(f"{_BASE}?key={api_key}&pageSize=200")
+        out = []
+        for entry in data.get("models", []):
+            name = (entry.get("name") or "").split("/")[-1]
+            # The same endpoint lists embedding and image models, which have no
+            # generateContent method - the only reliable way to tell them apart.
+            if not name or "generateContent" not in (
+                    entry.get("supportedGenerationMethods") or []):
+                continue
+            out.append(ModelInfo(
+                id=name,
+                name=entry.get("displayName") or name,
+                context=int(entry.get("inputTokenLimit") or 0),
+            ))
+        return out
 
     def chat(self, request: ChatRequest, api_key: str) -> str:
         if not api_key:
