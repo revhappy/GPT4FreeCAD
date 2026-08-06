@@ -130,6 +130,8 @@ class EngineeringWidget(QtWidgets.QWidget):
         if self._apply_program(combined, select=len(combined) - 1):
             note = " (auto-repaired)" if getattr(result, "repaired", False) else ""
             self.host._log_system(f"Added {len(new_ops)} step(s){note}.")
+            for fix in getattr(result, "notes", ()):
+                self.host._log_system(f"note: {fix}")
             self.host.input.clear()
             return
         error = self._last_error or "unknown build error"

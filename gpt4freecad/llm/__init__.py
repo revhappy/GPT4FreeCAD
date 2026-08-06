@@ -31,6 +31,7 @@ from .base import (
 from . import gemini as _gemini  # noqa: F401
 from . import openai as _openai  # noqa: F401
 from . import anthropic as _anthropic  # noqa: F401
+from . import grok as _grok  # noqa: F401
 from . import openrouter as _openrouter  # noqa: F401
 from . import local as _local  # noqa: F401
 from . import localserver as _localserver  # noqa: F401

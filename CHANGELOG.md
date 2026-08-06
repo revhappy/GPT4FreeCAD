@@ -1,5 +1,54 @@
 # GPT4FreeCAD Changelog
 
+## [2.7.0] - 2026-08-06
+
+Stops blaming the user for the protocol's own mistake, and gives OpenRouter
+real schema enforcement.
+
+### Fixed
+- **Reusing an object name no longer fails the step.** Engineering mode appends,
+  so asking to change something that already exists makes the model define that
+  name again — "a hole bored in the centre", then "bore the hole through",
+  and the second step died on *object name 'hole' is already used*. The
+  collision is created by the append-only protocol, not by the user, and the
+  correction never needs judgement, so it is now applied deterministically:
+  `hole` becomes `hole_2` with a note in the log, no repair round spent.
+  References are rewritten only when they point at a name defined in the same
+  batch, so an op named `hole` whose target is `hole` correctly becomes
+  `hole_2` cut from the original.
+- **A hole that misses the material is caught.** The boolean check only asked
+  whether *anything* had been removed, so a 6 mm hole positioned on the bottom
+  face and drilled downwards took **0.28 mm³ out of 6283** and reported success
+  — which is what made the follow-up step necessary in the first place. Holes
+  are now measured against the volume the drill itself sweeps, and one that
+  removes less than a fifth of it fails with an explanation of what `position`
+  means. Threshold deliberately slack: a hole at the edge of a part or breaking
+  into a cavity legitimately removes less than its own volume.
+- **Optional fields sent as `null` no longer break the build.** Strict
+  structured outputs have no optional properties — every one must be present —
+  so a model using them writes `"axis": null` where a plain JSON reply omits
+  the key. `op.get("axis", default)` then returned None and `Vector(*None)`
+  ended the build. Absent and null now mean the same thing throughout the
+  interpreter and the validator, including inside `placement`. Found by running
+  a strict-shaped reply through a real build, not by inspection.
+
+### Added
+- **OpenRouter enforces the schema.** `schema.json_schema(strict=True)` emits
+  the structured-outputs dialect (every object closed, every property required,
+  optional properties nullable, no size keywords) and the adapter sends it as
+  `response_format: json_schema`. 263 of OpenRouter's 340 models advertise
+  support; for the rest the first request downgrades to plain JSON mode and the
+  model is remembered for the session, so the discovery costs one request, once.
+  An auth or network failure is never mistaken for a schema rejection.
+  The permissive schema is untouched — the local grammar path still needs it.
+- **xAI (Grok) provider.** OpenAI-compatible endpoint at `api.x.ai` with its own
+  key, live catalogue from `/v1/models`, and the same searchable picker. Sends
+  the strict schema too. `default_models` is deliberately thin: model names
+  there change often, and Browse… is the answer rather than a literal that rots.
+
+### Changed
+- 206 unit tests (was 181).
+
 ## [2.6.0] - 2026-08-05
 
 Model lists stop being a Python literal.

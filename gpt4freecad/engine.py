@@ -24,6 +24,9 @@ class GenerationResult:
     code: Optional[str] = None                       # python mode
     repaired: bool = False
     messages: List[Dict[str, str]] = field(default_factory=list)
+    # Deterministic corrections applied to the model's reply before validating,
+    # surfaced in the activity log so a silent fix is never actually silent.
+    notes: List[str] = field(default_factory=list)
 
 
 def generate(
@@ -89,13 +92,15 @@ def _generate_structured(
     raw = provider.chat(
         ChatRequest(messages=messages, model=model, temperature=temperature,
                     max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level,
-                    json_schema=schema.json_schema()),
+                    json_schema=schema.json_schema(),
+                    json_schema_strict=schema.json_schema(strict=True)),
         api_key,
     )
 
     try:
-        program = schema.validate_program(extract_json(raw))
-        return GenerationResult(mode="structured", raw=raw, program=program, messages=messages)
+        program, notes = _validated_program(raw)
+        return GenerationResult(mode="structured", raw=raw, program=program,
+                                messages=messages, notes=notes)
     except (LLMError, schema.SchemaError) as first_error:
         # One automatic repair attempt: show the model its own output + the error.
         repair_messages = messages + [
@@ -105,19 +110,36 @@ def _generate_structured(
         raw2 = provider.chat(
             ChatRequest(messages=repair_messages, model=model, temperature=temperature,
                         max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level,
-                        json_schema=schema.json_schema()),
+                        json_schema=schema.json_schema(),
+                        json_schema_strict=schema.json_schema(strict=True)),
             api_key,
         )
         try:
-            program = schema.validate_program(extract_json(raw2))
+            program, notes = _validated_program(raw2)
         except (LLMError, schema.SchemaError) as second_error:
             # The panel's repair rounds need the reply itself - without it the
             # model is asked to fix a program it cannot see.
             second_error.raw_reply = raw2
             raise
         return GenerationResult(
-            mode="structured", raw=raw2, program=program, repaired=True, messages=messages
+            mode="structured", raw=raw2, program=program, repaired=True,
+            messages=messages, notes=notes
         )
+
+
+def _validated_program(raw: str):
+    """Parse, deterministically correct, then validate. Returns ``(ops, notes)``.
+
+    Reusing an object name is the one mistake worth fixing here rather than
+    sending back: the correction never needs judgement, and a repair round for
+    it costs a request to arrive at the same answer.
+    """
+    data = extract_json(raw)
+    operations = data.get("operations") if isinstance(data, dict) else data
+    if not isinstance(operations, list):
+        return schema.validate_program(data), []
+    operations, notes = schema.dedupe_names(operations)
+    return schema.validate_program({"operations": operations}), notes
 
 
 def generate_step(
@@ -153,12 +175,14 @@ def generate_step(
     raw = provider.chat(
         ChatRequest(messages=messages, model=model, temperature=temperature,
                     max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level,
-                    json_schema=_step_schema()),
+                    json_schema=_step_schema(),
+                    json_schema_strict=schema.json_schema(strict=True)),
         api_key,
     )
     try:
-        new_ops = _extract_new_ops(raw, program)
-        return GenerationResult(mode="engineering", raw=raw, program=new_ops, messages=messages)
+        new_ops, notes = _extract_new_ops(raw, program)
+        return GenerationResult(mode="engineering", raw=raw, program=new_ops,
+                                messages=messages, notes=notes)
     except (LLMError, schema.SchemaError) as first_error:
         repair_messages = messages + [
             {"role": "assistant", "content": raw},
@@ -167,16 +191,18 @@ def generate_step(
         raw2 = provider.chat(
             ChatRequest(messages=repair_messages, model=model, temperature=temperature,
                         max_tokens=max_tokens, json_mode=True, thinking_level=thinking_level,
-                        json_schema=_step_schema()),
+                        json_schema=_step_schema(),
+                        json_schema_strict=schema.json_schema(strict=True)),
             api_key,
         )
         try:
-            new_ops = _extract_new_ops(raw2, program)
+            new_ops, notes = _extract_new_ops(raw2, program)
         except (LLMError, schema.SchemaError) as second_error:
             second_error.raw_reply = raw2
             raise
         return GenerationResult(
-            mode="engineering", raw=raw2, program=new_ops, repaired=True, messages=messages
+            mode="engineering", raw=raw2, program=new_ops, repaired=True,
+            messages=messages, notes=notes
         )
 
 
@@ -189,11 +215,22 @@ def _step_schema() -> Dict[str, Any]:
     return schema.json_schema()
 
 
-def _extract_new_ops(raw: str, program: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _extract_new_ops(raw: str, program: List[Dict[str, Any]]):
+    """Parse a step reply into appendable ops. Returns ``(ops, notes)``.
+
+    A step that reuses an existing object name is renamed rather than rejected:
+    the append-only protocol makes the collision inevitable the moment the user
+    asks to change something that already exists, and the correction is always
+    the same, so spending a repair round on it helps nobody.
+    """
     data = extract_json(raw)
     new_ops = data.get("operations") if isinstance(data, dict) else data
     if not isinstance(new_ops, list) or not new_ops:
         raise schema.SchemaError("Step reply did not contain an 'operations' array.")
-    # Validate the combined program so refs resolve and names stay unique.
+    taken = [op["name"] for op in program
+             if isinstance(op.get("name"), str)
+             and schema.OPERATIONS.get(op.get("op"), {}).get("defines")]
+    new_ops, notes = schema.dedupe_names(new_ops, taken)
+    # Validate the combined program so references resolve.
     schema.validate_program({"operations": program + new_ops})
-    return new_ops
+    return new_ops, notes

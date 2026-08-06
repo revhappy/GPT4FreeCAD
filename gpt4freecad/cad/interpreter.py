@@ -38,13 +38,31 @@ def _drain_notes() -> List[str]:
     return notes
 
 
+def _opt(op: Dict[str, Any], key: str, default):
+    """An optional field's value, treating an explicit null as "not given".
+
+    ``op.get(key, default)`` is wrong for any reply produced under strict
+    structured outputs: that dialect has no optional properties, so a model
+    must send every one and writes ``"axis": null`` where a plain JSON reply
+    would have omitted the key. ``.get`` then hands back None instead of the
+    default, and ``Vector(*None)`` is the end of the build. A falsy-or-default
+    (``x or default``) is wrong too - it would turn a deliberate ``fuse: false``
+    into true.
+    """
+    value = op.get(key)
+    return default if value is None else value
+
+
 def _placement(spec: Optional[dict]) -> App.Placement:
     """Build an App.Placement from an IR placement dict (pos + rotation)."""
+    # A null member means "not given" - see _check_placement in schema.py:
+    # a strict-structured-output model must emit every property, so absent and
+    # null have to behave identically here too.
     if not spec:
         return App.Placement()
-    pos = Vector(*spec["pos"]) if "pos" in spec else Vector(0, 0, 0)
-    if "rotation" in spec:
-        rot = spec["rotation"]
+    pos = Vector(*spec["pos"]) if spec.get("pos") is not None else Vector(0, 0, 0)
+    rot = spec.get("rotation")
+    if rot is not None:
         rotation = App.Rotation(Vector(*rot["axis"]), rot["angle"])
     else:
         rotation = App.Rotation()
@@ -158,12 +176,46 @@ def _check_booleans(operations, objects: Dict[str, Any]) -> None:
             continue
         if v_source <= 0:
             continue
-        if v_result >= v_source - max(1e-6, 1e-9 * v_source):
+        removed = v_source - v_result
+        if removed <= max(1e-6, 1e-9 * v_source):
             raise InterpreterError(
                 f"'{op['name']}' ({op['op']}) removed no material from "
                 f"'{source_name}' - the tool does not intersect it. Check the "
                 "placement and size of the cutting tool."
             )
+        _check_hole_bit(op, removed)
+
+
+# A hole that grazes the surface still removes *something*, so "removed > 0" is
+# not enough: a 4 mm hole positioned at z=0 on a disc that starts at z=0 took
+# 0.2 mm3 out of 6283 and reported success. Comparing against the volume the
+# tool itself sweeps catches it. The threshold is deliberately slack - a hole
+# at the edge of a part, or one breaking into an existing cavity, legitimately
+# removes less than its own volume.
+_HOLE_MIN_FRACTION = 0.2
+
+
+def _check_hole_bit(op, removed: float) -> None:
+    """Raise if a hole barely touched the part it was supposed to go into."""
+    if op["op"] != "hole":
+        return
+    try:
+        radius = float(op["diameter"]) / 2.0
+        depth = float(op["depth"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if op.get("through") or radius <= 0 or depth <= 0:
+        return  # a through hole's depth is the part, not the given number
+    expected = math.pi * radius * radius * depth
+    if removed >= expected * _HOLE_MIN_FRACTION:
+        return
+    raise InterpreterError(
+        f"'{op['name']}' (hole) only removed {removed:.3g} mm3 of the "
+        f"{expected:.3g} mm3 it should have - the hole is almost entirely "
+        f"outside '{op.get('target')}'. 'position' is the centre of the hole's "
+        "TOP, and it drills along 'axis' (default straight down), so the "
+        "position has to sit on the surface it enters, not below the part."
+    )
 
 
 def build_program(operations: List[Dict[str, Any]], doc=None,
@@ -538,9 +590,9 @@ def _linear_pattern(op, doc, objects):
     d1.normalize()
     n1, s1 = int(op["count"]), op["spacing"]
 
-    d2 = Vector(*op.get("direction2", [0, 0, 0]))
-    n2 = int(op.get("count2", 1) or 1)
-    s2 = op.get("spacing2", 0) or 0
+    d2 = Vector(*_opt(op, "direction2", [0, 0, 0]))
+    n2 = max(int(_opt(op, "count2", 1)), 1)
+    s2 = _opt(op, "spacing2", 0)
     if d2.Length:
         d2.normalize()
 
@@ -550,8 +602,8 @@ def _linear_pattern(op, doc, objects):
             c = base.copy()
             c.translate(d1 * (i * s1) + d2 * (j * s2))
             copies.append(c)
-    obj = _feature(doc, op["name"], _combine(copies, op.get("fuse", True)))
-    if not op.get("keep_source", False):
+    obj = _feature(doc, op["name"], _combine(copies, _opt(op, "fuse", True)))
+    if not _opt(op, "keep_source", False):
         _hide(objects[op["source"]])
     return obj
 
@@ -559,11 +611,11 @@ def _linear_pattern(op, doc, objects):
 def _polar_pattern(op, doc, objects):
     base = _computed_shape(objects[op["source"]])
     count = max(int(op["count"]), 1)
-    angle = op.get("angle", 360)
-    axis = Vector(*op.get("axis", [0, 0, 1]))
+    angle = _opt(op, "angle", 360)
+    axis = Vector(*_opt(op, "axis", [0, 0, 1]))
     if axis.Length == 0:
         raise InterpreterError("polar_pattern 'axis' must be non-zero.")
-    center = Vector(*op.get("center", [0, 0, 0]))
+    center = Vector(*_opt(op, "center", [0, 0, 0]))
 
     full = abs(angle) >= 360 - 1e-9
     if full:
@@ -576,8 +628,8 @@ def _polar_pattern(op, doc, objects):
         c = base.copy()
         c.rotate(center, axis, step * i)
         copies.append(c)
-    obj = _feature(doc, op["name"], _combine(copies, op.get("fuse", True)))
-    if not op.get("keep_source", False):
+    obj = _feature(doc, op["name"], _combine(copies, _opt(op, "fuse", True)))
+    if not _opt(op, "keep_source", False):
         _hide(objects[op["source"]])
     return obj
 
@@ -586,9 +638,9 @@ def _mirror(op, doc, objects):
     src = objects[op["source"]]
     base = _computed_shape(src)
     normal = Vector(*_PLANE_NORMALS[str(op["plane"]).upper()])
-    point = Vector(*op.get("base", [0, 0, 0]))
+    point = Vector(*_opt(op, "base", [0, 0, 0]))
     mirrored = base.mirror(point, normal)
-    combine = op.get("combine", True)
+    combine = _opt(op, "combine", True)
     shape = base.fuse(mirrored) if combine else mirrored
     obj = _feature(doc, op["name"], shape)
     if combine:
@@ -636,7 +688,7 @@ def _hole(op, doc, objects):
     target = objects[op["target"]]
     base = _computed_shape(target)
     pos = Vector(*op["position"])
-    axis = Vector(*op.get("axis", [0, 0, -1]))
+    axis = Vector(*_opt(op, "axis", [0, 0, -1]))
     if axis.Length == 0:
         axis = Vector(0, 0, -1)
     axis.normalize()

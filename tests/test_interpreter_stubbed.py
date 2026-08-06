@@ -471,6 +471,70 @@ def test_an_oversized_fillet_keeps_shrinking_past_an_invalid_shape():
 
 
 # --------------------------------------------------------------------------- #
+# optional fields sent as null (strict structured outputs)
+# --------------------------------------------------------------------------- #
+def test_an_explicit_null_optional_means_not_given():
+    """Strict mode has no optional properties, so models send "axis": null."""
+    assert interpreter._opt({}, "axis", [0, 0, -1]) == [0, 0, -1]
+    assert interpreter._opt({"axis": None}, "axis", [0, 0, -1]) == [0, 0, -1]
+    assert interpreter._opt({"axis": [1, 0, 0]}, "axis", [0, 0, -1]) == [1, 0, 0]
+
+
+def test_a_deliberate_false_is_not_treated_as_missing():
+    """The reason this is not just `op.get(k) or default`."""
+    assert interpreter._opt({"fuse": False}, "fuse", True) is False
+    assert interpreter._opt({"spacing2": 0}, "spacing2", 5) == 0
+    assert interpreter._opt({"fuse": None}, "fuse", True) is True
+
+
+def test_a_null_placement_member_is_the_same_as_an_absent_one():
+    """`Vector(*None)` used to end the build the moment a strict reply arrived."""
+    # The stubs record their constructor arguments, so comparing those compares
+    # the placements: same position, same (identity) rotation.
+    plain = interpreter._placement({"pos": [1, 2, 3]})
+    nulled = interpreter._placement({"pos": [1, 2, 3], "rotation": None})
+    assert plain.args[0].args == nulled.args[0].args == (1, 2, 3)
+    assert plain.args[1].args == nulled.args[1].args == ()
+    # An entirely null placement falls back to the origin instead of raising.
+    assert interpreter._placement({"pos": None, "rotation": None}).args[0].args == (0, 0, 0)
+
+
+# --------------------------------------------------------------------------- #
+# holes that miss the material
+# --------------------------------------------------------------------------- #
+def test_a_hole_that_barely_grazes_the_part_is_caught():
+    """Reported case: 0.283 mm3 removed where 141 mm3 was asked for, because
+    the position sat on the bottom face with the hole drilling downwards."""
+    op = {"op": "hole", "name": "hole", "target": "disk", "diameter": 6,
+          "depth": 5, "position": [0, 0, 0]}
+    try:
+        interpreter._check_hole_bit(op, 0.283)
+    except interpreter.InterpreterError as exc:
+        assert "almost entirely outside 'disk'" in str(exc)
+        assert "centre of the hole's TOP" in str(exc)
+    else:
+        raise AssertionError("a hole that removed almost nothing must fail")
+
+
+def test_a_hole_that_does_its_job_passes():
+    op = {"op": "hole", "name": "hole", "target": "disk", "diameter": 6,
+          "depth": 5}
+    interpreter._check_hole_bit(op, 141.0)          # the full expected volume
+    interpreter._check_hole_bit(op, 45.0)           # a third of it: edge scallop
+
+
+def test_a_through_hole_is_not_measured_against_its_stated_depth():
+    """'depth' is ignored for a through hole - the part decides how deep."""
+    op = {"op": "hole", "name": "h", "target": "d", "diameter": 6,
+          "depth": 999, "through": True}
+    interpreter._check_hole_bit(op, 141.0)
+
+
+def test_only_holes_are_measured_this_way():
+    interpreter._check_hole_bit({"op": "cut", "name": "c"}, 0.001)
+
+
+# --------------------------------------------------------------------------- #
 # revolve
 # --------------------------------------------------------------------------- #
 def test_revolve_defaults_to_a_full_revolution():
