@@ -36,3 +36,12 @@ try:
     Gui.addWorkbench(GPT4FreeCADWorkbench())
 except Exception as exc:  # surface load errors in the Report view instead of failing silently
     FreeCAD.Console.PrintError(f"GPT4FreeCAD failed to load: {exc}\n")
+
+# The workbench alone is only reachable through the workbench selector. This
+# adds the panel and a toolbar that do not depend on the active workbench; both
+# are preferences, so it stays out of the way if the user turns them off.
+try:
+    from gpt4freecad.ui import startup as _startup
+    _startup.install()
+except Exception as exc:
+    FreeCAD.Console.PrintError(f"GPT4FreeCAD startup UI unavailable: {exc}\n")

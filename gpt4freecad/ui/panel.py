@@ -147,8 +147,7 @@ class GPTPanel(QtWidgets.QWidget):
         compact_combo(self.units_combo, 2)
         self.units_combo.setToolTip("Units")
         self.units_combo.addItems(_UNITS)
-        self.units_combo.currentTextChanged.connect(
-            lambda text: None if self._loading else self.cfg.set_units(text))
+        self.units_combo.currentTextChanged.connect(self._on_units_changed)
         mode_row.addWidget(self.units_combo, 1)
 
         self.thinking_label = QtWidgets.QLabel("T")
@@ -218,6 +217,8 @@ class GPTPanel(QtWidgets.QWidget):
         self.eng = EngineeringWidget(self)
         self.stack.addWidget(self.eng)
         self.output_tabs.addTab(self.stack, "Plan")
+        self.output_tabs.addTab(self._build_thinking_tab(mono), "Thinking")
+        self.output_tabs.addTab(self._build_prompt_tab(mono), "Prompt")
         root.addWidget(self.output_tabs, 1)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -257,6 +258,143 @@ class GPTPanel(QtWidgets.QWidget):
         self._reload_templates()
 
     # ------------------------------------------------------------------ #
+    # Thinking + prompt tabs
+    # ------------------------------------------------------------------ #
+    def _build_thinking_tab(self, mono):
+        """The model's reasoning for the last reply, and what it cost.
+
+        Read-only: this is a record of what happened, not an input. Providers
+        that do not return reasoning say so here rather than showing a blank.
+        """
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+
+        self.usage_label = QtWidgets.QLabel("")
+        self.usage_label.setStyleSheet("color: gray;")
+        self.usage_label.setVisible(False)
+        layout.addWidget(self.usage_label)
+
+        self.thinking = QtWidgets.QPlainTextEdit()
+        self.thinking.setReadOnly(True)
+        self.thinking.setFont(mono)
+        self.thinking.setMinimumSize(0, 0)
+        self.thinking.setPlaceholderText(
+            "The model's reasoning appears here after a generation.")
+        layout.addWidget(self.thinking, 1)
+        return page
+
+    def _build_prompt_tab(self, mono):
+        """The system prompt, editable.
+
+        The box always shows what will actually be sent - your own text once you
+        save one, the built-in instructions otherwise - so the prompt is never a
+        black box even if you never edit it. Overrides are stored per mode.
+        """
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+
+        self.prompt_status = QtWidgets.QLabel("")
+        self.prompt_status.setStyleSheet("color: gray;")
+        self.prompt_status.setWordWrap(True)
+        layout.addWidget(self.prompt_status)
+
+        self.prompt_edit = QtWidgets.QPlainTextEdit()
+        self.prompt_edit.setFont(mono)
+        self.prompt_edit.setMinimumSize(0, 0)
+        self.prompt_edit.setToolTip(
+            "The instructions sent with every request in this mode. Edit and "
+            "Save to steer the model directly; Reset restores the built-in "
+            "prompt. Engineering steps always get the program so far appended, "
+            "whatever this says.")
+        layout.addWidget(self.prompt_edit, 1)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(2)
+        save = QtWidgets.QToolButton()
+        save.setText("Save prompt")
+        save.setToolTip("Use this text for every request in the current mode.")
+        save.clicked.connect(self._save_prompt)
+        buttons.addWidget(save)
+        reset = QtWidgets.QToolButton()
+        reset.setText("Reset")
+        reset.setToolTip("Discard your prompt and go back to the built-in one.")
+        reset.clicked.connect(self._reset_prompt)
+        buttons.addWidget(reset)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        return page
+
+    def _default_system_prompt(self, mode=None) -> str:
+        """The built-in instructions for a mode, assembled as they would be sent."""
+        mode = mode or self._current_mode()
+        if mode == "python":
+            return prompts.PYTHON_SYSTEM_PROMPT
+        return prompts.system_prompt(
+            self.units_combo.currentText(),
+            engineering=(mode == "engineering"),
+            print_profile=self.cfg.print_profile(),
+            part_layout=self._current_part_layout(),
+        )
+
+    def _refresh_prompt_tab(self):
+        """Show the prompt for the current mode - the user's or the built-in."""
+        mode = self._current_mode()
+        override = self.cfg.system_prompt(mode)
+        self.prompt_edit.setPlainText(override or self._default_system_prompt(mode))
+        self.prompt_status.setText(
+            f"Your own prompt, used for {mode} mode." if override
+            else f"Built-in {mode} prompt. Edit and Save to use your own.")
+
+    def _save_prompt(self):
+        mode = self._current_mode()
+        text = self.prompt_edit.toPlainText().strip()
+        # Saving the built-in text unchanged means "no override" - otherwise the
+        # prompt would silently freeze at today's wording.
+        if not text or text == self._default_system_prompt(mode).strip():
+            self._reset_prompt()
+            return
+        self.cfg.set_system_prompt(mode, text)
+        self._refresh_prompt_tab()
+        self._log_system(f"Using your own system prompt for {mode} mode.")
+
+    def _reset_prompt(self):
+        mode = self._current_mode()
+        had_override = bool(self.cfg.system_prompt(mode))
+        self.cfg.set_system_prompt(mode, "")
+        self._refresh_prompt_tab()
+        if had_override:
+            self._log_system(f"Restored the built-in {mode} prompt.")
+
+    def show_reasoning(self, result):
+        """Fill the Thinking tab from a generation result. Safe to call always."""
+        usage = getattr(result, "usage", None) or {}
+        reasoning = (getattr(result, "reasoning", "") or "").strip()
+
+        if usage:
+            parts = [f"{name} {count:,}" for name, count in (
+                ("in", usage.get("input", 0)), ("out", usage.get("output", 0)),
+                ("thinking", usage.get("reasoning", 0)),
+                ("cached", usage.get("cached", 0))) if count]
+            self.usage_label.setText("tokens: " + ", ".join(parts))
+        self.usage_label.setVisible(bool(usage))
+
+        if reasoning:
+            self.thinking.setPlainText(reasoning)
+        elif usage.get("reasoning"):
+            # OpenAI's Chat Completions endpoint bills reasoning tokens but
+            # never returns the text. Saying so beats an empty box.
+            self.thinking.setPlainText(
+                f"This model reasoned for {usage['reasoning']:,} tokens, but "
+                "this provider's API does not return the reasoning text.")
+        else:
+            self.thinking.setPlainText(
+                "This model did not report any reasoning for the last reply.")
+
+    # ------------------------------------------------------------------ #
     # State load / persistence
     # ------------------------------------------------------------------ #
     def _load_state(self):
@@ -285,6 +423,9 @@ class GPTPanel(QtWidgets.QWidget):
 
         self.print_check.setChecked(self.cfg.print_mode())
         self._update_print_tooltip()
+        # Units, layout and print mode all feed the built-in prompt, so refresh
+        # it once they are loaded rather than only on the next mode change.
+        self._refresh_prompt_tab()
 
         if not self._any_key_set():
             self._log_system(
@@ -373,6 +514,7 @@ class GPTPanel(QtWidgets.QWidget):
             return
         layout = self._current_part_layout()
         self.cfg.set_part_layout(layout)
+        self._refresh_prompt_tab()  # the layout choice is spelled out in the prompt
         if layout == "separate":
             self._set_status("New parts will stay separate and editable.")
         else:
@@ -391,11 +533,21 @@ class GPTPanel(QtWidgets.QWidget):
         self.preview_label.setText("Plan (JSON):" if is_struct else "Python code:")
         self.output_tabs.setTabText(1, "Steps" if is_eng else "Plan")
         self.generate_btn.setText(self._generate_idle_label())
+        # Each mode has its own prompt; the tab must follow the mode.
+        self._refresh_prompt_tab()
+
+    def _on_units_changed(self, text):
+        if self._loading:
+            return
+        self.cfg.set_units(text)
+        self._refresh_prompt_tab()  # units are quoted in the built-in prompt
 
     def _on_print_toggled(self, checked):
         if not self._loading:
             self.cfg.set_print_mode(checked)
         self._update_print_tooltip()
+        if not self._loading:
+            self._refresh_prompt_tab()  # print mode adds a whole addendum
 
     def _update_print_tooltip(self):
         self.print_check.setToolTip(
@@ -533,6 +685,8 @@ class GPTPanel(QtWidgets.QWidget):
             "thinking_level": self.cfg.thinking_level(),
             "print_profile": self.cfg.print_profile(),
             "part_layout": self._current_part_layout(),
+            # "" means "use the built-in prompt"; engine treats it as unset.
+            "system_prompt": self.cfg.system_prompt(self._current_mode()),
         }
 
     def run_worker(self, fn, on_success, on_error=None):
@@ -579,6 +733,7 @@ class GPTPanel(QtWidgets.QWidget):
             mode=self._current_mode(), units=ctx["units"], temperature=ctx["temperature"],
             max_tokens=ctx["max_tokens"], thinking_level=ctx["thinking_level"],
             print_profile=ctx["print_profile"], part_layout=ctx["part_layout"],
+            system_prompt=ctx["system_prompt"],
         )
         self.run_worker(fn, self._on_generated)
 
@@ -598,6 +753,7 @@ class GPTPanel(QtWidgets.QWidget):
 
     def _on_generated(self, result):
         self.last_result = result
+        self.show_reasoning(result)
         self.history.append({"role": "user", "content": self._pending_user})
         self.history.append({"role": "assistant", "content": result.raw})
         if len(self.history) > _HISTORY_MAX:
@@ -970,6 +1126,8 @@ class GPTPanel(QtWidgets.QWidget):
         self._last_built = None
         self.log.clear()
         self.preview.clear()
+        self.thinking.clear()
+        self.usage_label.setVisible(False)
         self.input.clear()
         self.build_btn.setEnabled(False)
         self.export_btn.setEnabled(False)

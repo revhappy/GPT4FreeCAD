@@ -150,10 +150,17 @@ def system_prompt(units: str = "mm", *, engineering: bool = False, print_profile
 
 
 def step_system_prompt(units: str, program, *, engineering: bool = True, print_profile=None,
-                       part_layout: str = "fused") -> str:
-    """Prompt for adding ONE step to an existing program (engineering timeline)."""
-    base = system_prompt(units, engineering=engineering, print_profile=print_profile,
-                         part_layout=part_layout)
+                       part_layout: str = "fused", base: str = "") -> str:
+    """Prompt for adding ONE step to an existing program (engineering timeline).
+
+    ``base`` replaces the standing instructions (that is where a user's own
+    prompt goes). The STEP MODE block below is appended either way: it carries
+    the program built so far, which is state rather than instruction, and a step
+    generated without it would re-derive the part from nothing.
+    """
+    base = base or system_prompt(units, engineering=engineering,
+                                 print_profile=print_profile,
+                                 part_layout=part_layout)
     defined = [op.get("name") for op in (program or []) if op.get("name")]
     summary = (json.dumps({"operations": program}, indent=2)
                if program else "(empty - this is the first step)")

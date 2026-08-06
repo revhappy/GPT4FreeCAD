@@ -126,6 +126,22 @@ or a local model on your own machine**.
 >   models accept a strict JSON schema, and the rest downgrade automatically after one
 >   request. The same guarantee local models get from grammar enforcement.
 > - **xAI (Grok)** joins as a provider, with its own key and live model list.
+>
+> **New in 2.8 — it's there when FreeCAD opens, and it shows its working:**
+> - **No workbench hunting.** FreeCAD never initialises a workbench until you pick it from
+>   the selector, so the panel was invisible until you went looking. It now opens on
+>   startup and a **GPT4FreeCAD toolbar button sits in every workbench** — both switchable
+>   off, along with an option to start FreeCAD in the GPT4FreeCAD workbench.
+> - **A Thinking tab** — the model's reasoning for the last reply and what it cost
+>   (input, output, thinking, cached tokens). Claude and Gemini return a readable summary;
+>   local models and OpenAI-compatible servers return whatever they emit. Those traces
+>   were already being paid for and thrown away.
+> - **Inline `<think>` blocks no longer break the parse.** Left in the reply they defeated
+>   the straight JSON read, so every local model that thinks out loud was paying for a
+>   fallback path it didn't need.
+> - **A Prompt tab** — the system prompt itself, editable, showing exactly what gets sent
+>   for the current mode. Save your own or reset to the built-in; stored per mode.
+>   Engineering steps always keep the program-so-far appended, whatever you write.
 
 ---
 
@@ -273,7 +289,9 @@ Clone into your FreeCAD `Mod` directory:
 git clone https://github.com/revhappy/GPT4FreeCAD
 ```
 
-Restart FreeCAD. **GPT4FreeCAD** will appear in the workbench dropdown.
+Restart FreeCAD. The panel opens on startup and a **GPT4FreeCAD** toolbar button sits
+in every workbench, so there is nothing to select — the workbench is there too, in the
+workbench dropdown, for its full menu.
 
 ### Option B — Addon Manager
 
@@ -281,7 +299,9 @@ Once published, install via **Tools → Addon Manager** and search for *GPT4Free
 
 ## Usage
 
-1. Select the **GPT4FreeCAD** workbench (or run the `GPTSTART.FCMacro` macro).
+1. The panel is already open — FreeCAD starts with it docked on the right. If you closed
+   it, press the **GPT4FreeCAD** toolbar button (present in every workbench), select the
+   **GPT4FreeCAD** workbench, or run the `GPTSTART.FCMacro` macro.
 2. Click the **⚙ settings** button and paste an API key for your provider. Pick a model.
 3. Choose **Provider**, **Model**, **Mode**, and **Units**. Optionally tick **3D-print mode**.
 4. Type a description and press **Generate** — or pick a **Template** to start from a
@@ -294,6 +314,47 @@ Once published, install via **Tools → Addon Manager** and search for *GPT4Free
 
 You can refine iteratively — after a result, just say *"make it 20 mm taller"* or
 *"add a 5 mm fillet to the top edges"* and it keeps the context.
+
+### Where it appears
+
+A FreeCAD workbench is invisible until you pick it from the workbench selector, so
+GPT4FreeCAD does not rely on one. Three settings under **⚙ settings → FreeCAD
+integration** control how it shows up, and all take effect without a restart:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Open the panel when FreeCAD starts | on | Docks the panel on the right as FreeCAD comes up, whatever workbench you are in. It stays put when you switch workbenches. |
+| Show the toolbar in every workbench | on | A GPT4FreeCAD button and a settings button, re-applied on every workbench change. |
+| Start FreeCAD in the GPT4FreeCAD workbench | off | Sets FreeCAD's startup workbench. Unchecking restores your previous one. |
+
+The commands are registered with FreeCAD proper (`GPT4FreeCAD_ShowPanel`,
+`GPT4FreeCAD_Settings`), so you can also bind keyboard shortcuts to them or drop them
+onto your own toolbars under **Tools → Customize**.
+
+### Seeing and steering the model
+
+Two tabs sit next to **Activity** and **Plan**, for when you want to know what the
+model is doing rather than just what it produced:
+
+- **Thinking** — the model's reasoning for the last reply, plus the token counts it
+  cost (input, output, thinking, cached). Anthropic and Gemini return a readable
+  summary of the reasoning; local models and OpenAI-compatible servers return
+  whatever they emit, including inline `<think>` blocks. OpenAI's Chat Completions
+  endpoint bills reasoning tokens but does not return the text, so the tab reports
+  the count and says so rather than showing an empty box.
+- **Prompt** — the system prompt itself, editable. The box always shows exactly
+  what will be sent for the current mode, so the instructions are never hidden even
+  if you never touch them. **Save prompt** uses your text from then on; **Reset**
+  restores the built-in one. Overrides are stored per mode, since a prompt written
+  for the JSON schema is not one that produces Python. Engineering steps always get
+  the program built so far appended, whatever your prompt says — that is state, not
+  instruction, and a step without it would re-derive the part from nothing.
+
+Everything the model produces is editable before it becomes geometry: the **Plan**
+tab holds the generated JSON (or Python) in a text editor, and **Build** builds what
+is in the box — not what the model originally said. Generation parameters
+(temperature, max tokens, auto-repair rounds) are in **⚙ settings**; provider, model,
+mode, units and thinking level are on the panel itself.
 
 ### The three modes
 
@@ -337,7 +398,8 @@ gpt4freecad/
 ├── engine.py          orchestration: prompt → LLM → validated program / step   (pure)
 ├── util.py            small shared helpers                               (pure)
 ├── llm/               provider abstraction                               (pure)
-│   ├── base.py        Provider ABC, HTTP, JSON extraction, ModelInfo, registry
+│   ├── base.py        Provider ABC, HTTP, JSON extraction, ModelInfo, registry,
+│                       Reply (text + reasoning trace + token usage)
 │   ├── gemini.py · openai.py · anthropic.py · openrouter.py · grok.py
 │   ├── local.py       Machine Activation SDK: local GGUF models, no key
 │   ├── localserver.py Ollama / LM Studio: attach to a server you already run
@@ -355,7 +417,9 @@ gpt4freecad/
 │   ├── panel.py       header, mode stack, casual + 3D-print controls
 │   ├── engineering.py step-timeline widget (the feature history)
 │   ├── op_form.py     schema-driven parameter form (one editor per field)
-│   └── model_picker.py searchable model table (filter, price, JSON support)
+│   ├── model_picker.py searchable model table (filter, price, JSON support)
+│   └── startup.py     workbench-independent entry points: auto-open panel,
+│                       always-on toolbar, startup workbench       (FreeCAD)
 └── workbench.py       Gui.Workbench + commands                          (FreeCAD)
 ```
 

@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import List
 
 from .base import (
-    ChatRequest, LLMError, ModelInfo, Provider, http_get_json, http_post_json,
-    register,
+    ChatRequest, LLMError, ModelInfo, Provider, Reply, http_get_json,
+    http_post_json, register,
 )
 
 _BASE = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -96,9 +96,13 @@ class GeminiProvider(Provider):
             generation_config["maxOutputTokens"] = max(
                 request.max_tokens, _GEMINI3_MIN_OUTPUT_TOKENS
             )
+            # includeThoughts is what makes the thought summaries come back at
+            # all; without it the model still reasons, it just never says so.
+            thinking_config = {"includeThoughts": True}
             level = _resolve_thinking_level(model, request.thinking_level)
             if level:
-                generation_config["thinkingConfig"] = {"thinkingLevel": level}
+                thinking_config["thinkingLevel"] = level
+            generation_config["thinkingConfig"] = thinking_config
         else:
             generation_config["temperature"] = request.temperature
             generation_config["maxOutputTokens"] = request.max_tokens
@@ -117,7 +121,7 @@ class GeminiProvider(Provider):
         return _extract_text(data)
 
 
-def _extract_text(data: dict) -> str:
+def _extract_text(data: dict) -> Reply:
     candidates = data.get("candidates") or []
     if not candidates:
         feedback = data.get("promptFeedback", {})
@@ -129,7 +133,11 @@ def _extract_text(data: dict) -> str:
     cand = candidates[0]
     finish = cand.get("finishReason")
     parts = (cand.get("content") or {}).get("parts") or []
-    text = "".join(p.get("text", "") for p in parts)
+    # Thought summaries arrive as ordinary parts flagged "thought"; they must be
+    # kept out of the answer, which is parsed as JSON.
+    text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+    reasoning = "\n\n".join(
+        p.get("text", "") for p in parts if p.get("thought"))
     if not text:
         if finish == "MAX_TOKENS":
             raise LLMError(
@@ -137,4 +145,15 @@ def _extract_text(data: dict) -> str:
                 "Increase 'Max tokens' in Settings."
             )
         raise LLMError(f"Gemini returned an empty response (finishReason={finish}).")
-    return text
+    return Reply(text, reasoning=reasoning, usage=_usage(data.get("usageMetadata")))
+
+
+def _usage(raw) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    usage = {"input": raw.get("promptTokenCount", 0),
+             "output": raw.get("candidatesTokenCount", 0)}
+    thoughts = raw.get("thoughtsTokenCount") or 0
+    if thoughts:
+        usage["reasoning"] = thoughts
+    return usage

@@ -9,8 +9,8 @@
     fillets, extrudes, revolves, and more) built as an editable feature tree,
     with an optional advanced Python-scripting mode.
   </description>
-  <version>2.7.0</version>
-  <date>2026-07-30</date>
+  <version>2.8.0</version>
+  <date>2026-08-06</date>
   <maintainer email="revhappys2k@gmail.com">Robb Sharma</maintainer>
   <license file="LICENSE.MD">MIT</license>
 

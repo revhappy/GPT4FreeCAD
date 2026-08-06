@@ -1,5 +1,50 @@
 # GPT4FreeCAD Changelog
 
+## [2.8.0] - 2026-08-06
+
+Stops hiding behind the workbench selector, and stops hiding what the model is
+doing.
+
+### Added
+- **A Thinking tab: the model's reasoning, and what it cost.** Every provider
+  reports reasoning differently and most of them were being thrown away.
+  Anthropic now asks for `thinking: {"type": "adaptive", "display":
+  "summarized"}` on the models that take it — those models were already thinking
+  and billing for it, and the trace was arriving as an empty block for want of
+  asking. Gemini sends `includeThoughts`. OpenAI-compatible servers put it in
+  `reasoning_content` or `reasoning`; local GGUF models emit `<think>` blocks
+  inline. All four are read into one place. OpenAI's Chat Completions endpoint
+  bills reasoning it never returns, so the tab reports the token count and says
+  the text is not available rather than showing an empty box.
+- **Inline `<think>` blocks no longer reach the JSON parser.** Splitting the
+  trace out of the reply is not only for display: left in place it defeated the
+  straight parse, so every local model that thinks out loud was paying for a
+  fallback path it did not need.
+- **A Prompt tab: the system prompt, editable.** The box shows exactly what will
+  be sent for the current mode, so the instructions are visible whether or not
+  you edit them. Saving uses your text; Reset restores the built-in one; saving
+  the built-in text unchanged means "no override" rather than freezing today's
+  wording. Overrides are per mode. Engineering steps always get the program so
+  far appended regardless — that is state, not instruction.
+- **Token counts** for every reply (input, output, thinking, cached), shown
+  above the trace.
+- **The panel opens on startup.** FreeCAD does not even initialise a workbench
+  until the user picks it from the selector, so an addon that lives only in a
+  workbench is invisible until you go looking for it. `InitGui.py` — which
+  FreeCAD *does* run for every addon at startup — now installs the panel once
+  the main window has an event loop. It is a dock widget owned by the main
+  window, so it survives workbench switches instead of coming and going.
+- **A GPT4FreeCAD toolbar in every workbench.** Two buttons (panel, settings)
+  that call the same registered commands. FreeCAD rebuilds the toolbar area on
+  every workbench change, so the toolbar is re-asserted from the
+  `workbenchActivated` signal rather than added once and hoped for.
+- **Optional startup workbench.** A checkbox sets FreeCAD's `AutoloadModule` to
+  the GPT4FreeCAD workbench; unchecking it restores whatever was there before,
+  which is remembered rather than guessed.
+
+All three are settings under **⚙ settings → FreeCAD integration**, on / on / off
+by default, and applied immediately on save — no restart to change your mind.
+
 ## [2.7.0] - 2026-08-06
 
 Stops blaming the user for the protocol's own mistake, and gives OpenRouter

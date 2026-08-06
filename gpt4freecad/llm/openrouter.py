@@ -16,8 +16,8 @@ from __future__ import annotations
 from typing import List
 
 from .base import (
-    ChatRequest, LLMError, ModelInfo, Provider, http_get_json, http_post_json,
-    price_per_million, register,
+    ChatRequest, LLMError, ModelInfo, Provider, Reply, http_get_json,
+    http_post_json, openai_reply, price_per_million, register,
 )
 
 _ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
@@ -154,7 +154,7 @@ def _is_schema_rejection(exc: LLMError) -> bool:
         "does not support"))
 
 
-def _extract_text(data: dict) -> str:
+def _extract_text(data: dict) -> Reply:
     """Pull the reply out, turning OpenRouter's own error shapes into LLMError.
 
     Unlike OpenAI, a routing failure can come back as HTTP 200 with an "error"
@@ -177,4 +177,4 @@ def _extract_text(data: dict) -> str:
             f"OpenRouter returned an empty message (finish_reason={finish}). "
             "Some models ignore a JSON-mode request; try another model."
         )
-    return content
+    return openai_reply(message, content, data.get("usage"), "OpenRouter")

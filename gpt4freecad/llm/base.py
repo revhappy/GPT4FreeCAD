@@ -197,6 +197,104 @@ def _read_error_body(exc: urllib.error.HTTPError) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Replies
+# --------------------------------------------------------------------------- #
+class Reply(str):
+    """The assistant's text, with the metadata the panel shows alongside it.
+
+    ``Provider.chat`` has always returned the reply text, and everything
+    downstream - history, the editable preview, JSON extraction - treats it as a
+    string. Reasoning traces and token counts are *about* that text rather than
+    part of it, so they ride along as attributes of a ``str`` subclass: callers
+    that only want the reply keep working untouched, and the panel reads
+    ``reply.reasoning`` when it wants to show the model's thinking.
+
+    The attributes survive only as long as the object does; ``reply[1:]`` or
+    ``"".join(...)`` gives a plain ``str`` back. Read them at the call site,
+    which is what :mod:`gpt4freecad.engine` does.
+    """
+
+    __slots__ = ("reasoning", "usage")
+
+    def __new__(cls, text, reasoning: str = "", usage: Optional[dict] = None):
+        obj = super().__new__(cls, text if text is not None else "")
+        obj.reasoning = (reasoning or "").strip()
+        obj.usage = dict(usage or {})
+        return obj
+
+
+def reasoning_of(reply: Any) -> str:
+    """The reasoning attached to a reply, or ``""`` for a plain string."""
+    return getattr(reply, "reasoning", "") or ""
+
+
+def usage_of(reply: Any) -> dict:
+    """The token usage attached to a reply, or ``{}`` for a plain string."""
+    return dict(getattr(reply, "usage", None) or {})
+
+
+# Local models and OpenAI-compatible servers frequently emit their reasoning
+# inline, wrapped in <think>...</think>, instead of in a separate field.
+_THINK_RE = re.compile(r"<(think|thinking|reasoning)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
+# A trace that was cut off by the token limit never gets its closing tag.
+_OPEN_THINK_RE = re.compile(r"<(think|thinking|reasoning)>(.*)$", re.DOTALL | re.IGNORECASE)
+
+
+def split_think_tags(text: str) -> "tuple[str, str]":
+    """Split inline ``<think>`` reasoning out of a reply. Returns ``(text, reasoning)``.
+
+    Pulling the trace out is not only for display: left in place it defeats the
+    "reply is a JSON object" straight parse, so every local model paid for a
+    fallback path it did not need.
+    """
+    if not text:
+        return "", ""
+    traces = [match.group(2).strip() for match in _THINK_RE.finditer(text)]
+    remainder = _THINK_RE.sub("", text)
+    unterminated = _OPEN_THINK_RE.search(remainder)
+    if unterminated is not None:
+        traces.append(unterminated.group(2).strip())
+        remainder = remainder[: unterminated.start()]
+    return remainder.strip(), "\n\n".join(t for t in traces if t).strip()
+
+
+def openai_reply(message: dict, content: str, usage: Any = None,
+                 label: str = "The model") -> "Reply":
+    """Build a :class:`Reply` from an OpenAI-shaped assistant message.
+
+    Four adapters speak this dialect, and each server puts reasoning somewhere
+    slightly different: a ``reasoning_content`` field (LM Studio, vLLM), a
+    ``reasoning`` field (OpenRouter), or inline ``<think>`` tags in the content
+    itself (llama.cpp and most GGUF chat templates). All three are handled here
+    so no adapter has to care which one it is talking to.
+    """
+    text, inline = split_think_tags(content)
+    reported = message.get("reasoning_content") or message.get("reasoning") or ""
+    if not isinstance(reported, str):
+        # OpenRouter can send a structured reasoning_details list instead.
+        reported = ""
+    reasoning = "\n\n".join(p for p in (reported.strip(), inline) if p)
+    if not text:
+        raise LLMError(
+            f"{label} returned reasoning but no answer. Raise 'Max tokens' in "
+            "Settings - the thinking used the whole budget."
+        )
+    return Reply(text, reasoning=reasoning, usage=openai_usage(usage))
+
+
+def openai_usage(raw: Any) -> dict:
+    """Token counts from an OpenAI-shaped ``usage`` object."""
+    if not isinstance(raw, dict):
+        return {}
+    usage = {"input": raw.get("prompt_tokens", 0),
+             "output": raw.get("completion_tokens", 0)}
+    details = raw.get("completion_tokens_details")
+    if isinstance(details, dict) and details.get("reasoning_tokens"):
+        usage["reasoning"] = details["reasoning_tokens"]
+    return usage
+
+
+# --------------------------------------------------------------------------- #
 # Tolerant JSON extraction
 # --------------------------------------------------------------------------- #
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
@@ -340,8 +438,12 @@ class Provider:
     def default_model(self) -> str:
         return self.default_models[0] if self.default_models else ""
 
-    def chat(self, request: ChatRequest, api_key: str) -> str:
-        """Run a chat completion and return the assistant text content."""
+    def chat(self, request: ChatRequest, api_key: str) -> "Reply":
+        """Run a chat completion and return the assistant text content.
+
+        The return value is a :class:`Reply` - a ``str`` carrying the reasoning
+        trace and token usage when the provider reports them.
+        """
         raise NotImplementedError
 
     def fetch_models(self, api_key: str = "") -> List[ModelInfo]:

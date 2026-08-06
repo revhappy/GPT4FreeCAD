@@ -112,6 +112,7 @@ class FakePanel:
         self.logs, self.errors, self.status = [], [], []
         self.sent = []        # prompts handed back to the model
         self.builds = 0       # times a rebuild was kicked off
+        self.traces = []      # reasoning shown in the Thinking tab
 
     # --- the panel's own helpers, recorded instead of performed ---
     def _current_mode(self):
@@ -131,6 +132,9 @@ class FakePanel:
 
     def _start_generation(self, message, log_as_user=True):
         self.sent.append(message)
+
+    def show_reasoning(self, result):
+        self.traces.append(getattr(result, "reasoning", ""))
 
     def _build_from_preview(self, user_reviewed=False):
         self.builds += 1

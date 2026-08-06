@@ -8,6 +8,7 @@ from functools import partial
 from .qt import QtCore, QtGui, QtWidgets, exec_dialog
 from .model_picker import choose_model
 from .worker import LLMWorker
+from . import startup
 from ..config import get_config
 from ..llm import all_providers, get_provider, ChatRequest
 from ..llm.base import LLMError
@@ -58,6 +59,7 @@ class SettingsDialog(QtWidgets.QDialog):
             form_host.addWidget(self._provider_group(provider))
 
         form_host.addWidget(self._general_group())
+        form_host.addWidget(self._integration_group())
         form_host.addWidget(self._printing_group())
         form_host.addStretch(1)
 
@@ -255,6 +257,39 @@ class SettingsDialog(QtWidgets.QDialog):
             "back to the model for a fix before giving up. 0 disables auto-repair."
         )
         form.addRow("Auto-repair rounds:", self._repair_rounds)
+
+        return box
+
+    def _integration_group(self):
+        box = QtWidgets.QGroupBox("FreeCAD integration")
+        form = QtWidgets.QFormLayout(box)
+
+        self._auto_show = QtWidgets.QCheckBox(
+            "Open the panel when FreeCAD starts")
+        self._auto_show.setChecked(self.cfg.auto_show_panel())
+        self._auto_show.setToolTip(
+            "The panel appears on startup, in whichever workbench you are in. "
+            "Uncheck to open it yourself from the toolbar.")
+        form.addRow("", self._auto_show)
+
+        self._global_toolbar = QtWidgets.QCheckBox(
+            "Show the GPT4FreeCAD toolbar in every workbench")
+        self._global_toolbar.setChecked(self.cfg.global_toolbar())
+        self._global_toolbar.setToolTip(
+            "Keeps a button for the panel and this dialog on the toolbar no "
+            "matter which workbench is active.")
+        form.addRow("", self._global_toolbar)
+
+        self._start_workbench = QtWidgets.QCheckBox(
+            "Start FreeCAD in the GPT4FreeCAD workbench")
+        self._start_workbench.setToolTip(
+            "Changes FreeCAD's startup workbench. Unchecking restores whatever "
+            "it was before.")
+        try:
+            self._start_workbench.setChecked(startup.is_start_workbench())
+        except Exception:
+            self._start_workbench.setEnabled(False)
+        form.addRow("", self._start_workbench)
 
         return box
 
@@ -578,7 +613,24 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cfg.set_repair_rounds(self._repair_rounds.value())
         self.cfg.set_bed(self._bed_x.value(), self._bed_y.value(), self._bed_z.value())
         self.cfg.set_stl_deflection(self._deflection.value())
+        self._save_integration()
         self.accept()
+
+    def _save_integration(self):
+        """Persist the FreeCAD-integration settings and apply them immediately."""
+        # Switching auto-show on is a request to see the panel now, not only on
+        # the next start.
+        just_enabled = self._auto_show.isChecked() and not self.cfg.auto_show_panel()
+        self.cfg.set_auto_show_panel(self._auto_show.isChecked())
+        self.cfg.set_global_toolbar(self._global_toolbar.isChecked())
+        try:
+            if self._start_workbench.isEnabled():
+                startup.set_start_workbench(self._start_workbench.isChecked())
+            startup.apply_preferences(open_panel=just_enabled)
+        except Exception:
+            # Console mode, or a FreeCAD without a main window: the preferences
+            # are saved either way and take effect on the next GUI start.
+            pass
 
 
 def open_settings(parent=None) -> bool:

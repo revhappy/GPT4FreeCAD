@@ -21,7 +21,7 @@ from gpt4freecad.config import Config, _JsonBackend
 from gpt4freecad import engine, harness, util
 from gpt4freecad.llm import (
     all_providers, get_provider, extract_json, ChatRequest, LLMError, ModelInfo,
-    AuthError,
+    AuthError, Reply, split_think_tags,
 )
 from gpt4freecad.llm import openai as openai_mod
 from gpt4freecad.llm import anthropic as anthropic_mod
@@ -217,6 +217,125 @@ def test_openai_reasoning_model_request():
     assert get_provider("openai").default_model.startswith("gpt-5")
 
 
+# --- reasoning traces ------------------------------------------------------ #
+def test_think_tags_are_split_out_of_a_reply():
+    text, reasoning = split_think_tags(
+        "<think>the user wants a cube</think>\n{\"operations\": []}")
+    assert text == '{"operations": []}'
+    assert reasoning == "the user wants a cube"
+
+
+def test_an_unterminated_think_block_is_still_split():
+    """A trace cut off by the token limit never gets its closing tag."""
+    text, reasoning = split_think_tags("answer<think>cut off mid-thought")
+    assert text == "answer"
+    assert reasoning == "cut off mid-thought"
+
+
+def test_a_reply_without_think_tags_is_untouched():
+    text, reasoning = split_think_tags('{"operations": []}')
+    assert text == '{"operations": []}'
+    assert reasoning == ""
+
+
+def test_anthropic_asks_for_summarized_thinking_and_reads_it_back():
+    captured = _patch(anthropic_mod, {
+        "content": [{"type": "thinking", "thinking": "A cube needs one box op."},
+                    {"type": "text", "text": "ok"}],
+        "usage": {"input_tokens": 12, "output_tokens": 34},
+    })
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}], model="claude-opus-5")
+    out = get_provider("anthropic").chat(req, "k")
+    assert out == "ok"  # the thinking block never leaks into the answer
+    assert out.reasoning == "A cube needs one box op."
+    assert out.usage == {"input": 12, "output": 34}
+    assert captured["payload"]["thinking"] == {
+        "type": "adaptive", "display": "summarized"}
+
+
+def test_anthropic_leaves_older_models_alone():
+    """Pre-4.6 Claude takes a token budget, not adaptive thinking - don't send it."""
+    _patch(anthropic_mod, {"content": [{"type": "text", "text": "ok"}]})
+    captured = _patch(anthropic_mod, {"content": [{"type": "text", "text": "ok"}]})
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}], model="claude-haiku-4-5")
+    get_provider("anthropic").chat(req, "k")
+    assert "thinking" not in captured["payload"]
+
+
+def test_anthropic_drops_thinking_if_the_model_rejects_it():
+    """A garnish must never cost the whole generation."""
+    calls = {"n": 0}
+    payloads = []
+
+    def fake(url, payload, headers=None, timeout=120):
+        payloads.append(dict(payload))
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise LLMError("HTTP 400: thinking: unsupported parameter")
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    anthropic_mod.http_post_json = fake
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}], model="claude-opus-4-6")
+    assert get_provider("anthropic").chat(req, "k") == "ok"
+    assert "thinking" in payloads[0] and "thinking" not in payloads[1]
+
+
+def test_gemini_thought_parts_are_kept_out_of_the_answer():
+    _patch(gemini_mod, {
+        "candidates": [{"content": {"parts": [
+            {"text": "I should use a box.", "thought": True},
+            {"text": '{"operations": []}'},
+        ]}}],
+        "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 7,
+                          "thoughtsTokenCount": 40},
+    })
+    req = ChatRequest(messages=[{"role": "user", "content": "x"}], model="gemini-3.5-flash")
+    out = get_provider("gemini").chat(req, "g-key")
+    assert out == '{"operations": []}'
+    assert out.reasoning == "I should use a box."
+    assert out.usage["reasoning"] == 40
+
+
+def test_openai_shaped_reasoning_fields_are_picked_up():
+    """LM Studio and vLLM use reasoning_content; OpenRouter uses reasoning."""
+    _patch(openai_mod, {"choices": [{"message": {
+        "content": "ok", "reasoning_content": "thought about it"}}]})
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}], model="gpt-4o")
+    assert get_provider("openai").chat(req, "sk").reasoning == "thought about it"
+
+    _patch(openrouter_mod, {"choices": [{"message": {
+        "content": "ok", "reasoning": "routed thinking"}}]})
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}], model="x/y")
+    assert get_provider("openrouter").chat(req, "sk").reasoning == "routed thinking"
+
+
+def test_openai_reports_reasoning_tokens_when_the_text_is_withheld():
+    """Chat Completions bills reasoning it never returns - report the count."""
+    _patch(openai_mod, {
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 9,
+                  "completion_tokens_details": {"reasoning_tokens": 256}},
+    })
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}], model="gpt-5.1")
+    out = get_provider("openai").chat(req, "sk")
+    assert out.reasoning == ""
+    assert out.usage == {"input": 3, "output": 9, "reasoning": 256}
+
+
+def test_a_reply_that_is_only_thinking_says_so():
+    _patch(openai_mod, {"choices": [{"message": {"content": "<think>ran out</think>"}}]})
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}], model="gpt-4o")
+    message = expect_message(lambda: get_provider("openai").chat(req, "sk"), LLMError)
+    assert "Max tokens" in message
+
+
+def test_reply_is_a_plain_string_to_every_existing_caller():
+    reply = Reply("text", reasoning="why", usage={"input": 1})
+    assert reply == "text"
+    assert json.loads(Reply('{"a": 1}'))["a"] == 1
+    assert reply.upper() == "TEXT"  # str operations still work
+
+
 def test_gemini_request():
     captured = _patch(gemini_mod, {"candidates": [{"content": {"parts": [{"text": "{}"}]}}]})
     req = ChatRequest(
@@ -272,16 +391,19 @@ def test_gemini3_thinking_levels():
         req = ChatRequest(messages=[{"role": "user", "content": "x"}],
                           model="gemini-3.5-flash", thinking_level=level)
         get_provider("gemini").chat(req, "g-key")
-        assert captured["payload"]["generationConfig"]["thinkingConfig"] == {"thinkingLevel": level}
+        assert captured["payload"]["generationConfig"]["thinkingConfig"] == {
+            "includeThoughts": True, "thinkingLevel": level}
 
 
-def test_gemini3_thinking_default_omitted():
+def test_gemini3_thinking_level_omitted_when_default():
+    """No level pinned, but thoughts are still requested so the trace comes back."""
     for level in (None, "default", "bogus"):
         captured = _patch(gemini_mod, {"candidates": [{"content": {"parts": [{"text": "{}"}]}}]})
         req = ChatRequest(messages=[{"role": "user", "content": "x"}],
                           model="gemini-3.5-flash", thinking_level=level)
         get_provider("gemini").chat(req, "g-key")
-        assert "thinkingConfig" not in captured["payload"]["generationConfig"]
+        config = captured["payload"]["generationConfig"]["thinkingConfig"]
+        assert config == {"includeThoughts": True}
 
 
 def test_gemini3_pro_minimal_bumped_to_low():
@@ -289,7 +411,8 @@ def test_gemini3_pro_minimal_bumped_to_low():
     req = ChatRequest(messages=[{"role": "user", "content": "x"}],
                       model="gemini-3.1-pro-preview", thinking_level="minimal")
     get_provider("gemini").chat(req, "g-key")
-    assert captured["payload"]["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "low"}
+    assert captured["payload"]["generationConfig"]["thinkingConfig"] == {
+        "includeThoughts": True, "thinkingLevel": "low"}
 
 
 def test_gemini25_ignores_thinking_level():
@@ -377,14 +500,56 @@ class _FakeProvider:
         return self._replies.pop(0)
 
 
+_CUBE = '{"operations": [{"op": "box", "name": "b", "length": 1, "width": 1, "height": 1}]}'
+
+
 def test_engine_structured_ok():
-    prog = '{"operations": [{"op": "box", "name": "b", "length": 1, "width": 1, "height": 1}]}'
-    p = _FakeProvider([prog])
+    p = _FakeProvider([_CUBE])
     res = engine.generate(p, "key", "fake-1", "a 1mm cube", mode="structured")
     assert res.mode == "structured"
     assert res.program[0]["op"] == "box"
     assert res.repaired is False
     # system prompt mentions units + ops
+    assert "operations" in p.calls[0].messages[0]["content"]
+
+
+# --- reasoning + prompt overrides ----------------------------------------- #
+def test_engine_carries_reasoning_and_usage_to_the_panel():
+    reply = Reply(_CUBE, reasoning="First a box, then check the size.",
+                  usage={"input": 10, "output": 20})
+    res = engine.generate(_FakeProvider([reply]), "k", "fake-1", "cube")
+    assert res.reasoning == "First a box, then check the size."
+    assert res.usage == {"input": 10, "output": 20}
+
+
+def test_engine_result_has_empty_reasoning_for_a_plain_reply():
+    """A provider that reports nothing must not break the result contract."""
+    res = engine.generate(_FakeProvider([_CUBE]), "k", "fake-1", "cube")
+    assert res.reasoning == ""
+    assert res.usage == {}
+
+
+def test_a_custom_system_prompt_replaces_the_built_in_one():
+    p = _FakeProvider([_CUBE])
+    engine.generate(p, "k", "fake-1", "cube", system_prompt="Only make cubes.")
+    assert p.calls[0].messages[0]["content"] == "Only make cubes."
+
+
+def test_a_custom_step_prompt_still_gets_the_program_so_far():
+    """The program is state, not instruction: a custom prompt must not lose it."""
+    existing = [{"op": "box", "name": "base", "length": 10, "width": 10, "height": 2}]
+    step = '{"operations": [{"op": "sphere", "name": "knob", "radius": 2}]}'
+    p = _FakeProvider([step])
+    engine.generate_step(p, "k", "fake-1", existing, "add a knob",
+                         system_prompt="Terse CAD only.")
+    system = p.calls[0].messages[0]["content"]
+    assert system.startswith("Terse CAD only.")
+    assert "STEP MODE" in system and '"base"' in system
+
+
+def test_an_empty_system_prompt_means_use_the_built_in():
+    p = _FakeProvider([_CUBE])
+    engine.generate(p, "k", "fake-1", "cube", system_prompt="")
     assert "operations" in p.calls[0].messages[0]["content"]
 
 

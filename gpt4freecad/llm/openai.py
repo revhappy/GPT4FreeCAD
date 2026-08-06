@@ -9,8 +9,8 @@ from __future__ import annotations
 from typing import List
 
 from .base import (
-    ChatRequest, LLMError, ModelInfo, Provider, http_get_json, http_post_json,
-    register,
+    ChatRequest, LLMError, ModelInfo, Provider, Reply, http_get_json,
+    http_post_json, openai_reply, register,
 )
 
 _DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
@@ -93,7 +93,7 @@ class OpenAIProvider(Provider):
         return _extract_text(data)
 
 
-def _extract_text(data: dict) -> str:
+def _extract_text(data: dict) -> Reply:
     choices = data.get("choices") or []
     if not choices:
         raise LLMError("OpenAI returned no choices.")
@@ -102,4 +102,7 @@ def _extract_text(data: dict) -> str:
     if not content:
         finish = choices[0].get("finish_reason")
         raise LLMError(f"OpenAI returned an empty message (finish_reason={finish}).")
-    return content
+    # Chat Completions never returns the reasoning text for the o-series and
+    # gpt-5 models - only how many tokens it took. The panel reports the count
+    # and says so, rather than showing an empty trace.
+    return openai_reply(message, content, data.get("usage"), "OpenAI")

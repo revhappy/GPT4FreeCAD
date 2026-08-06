@@ -15,8 +15,8 @@ from __future__ import annotations
 from typing import List
 
 from .base import (
-    ChatRequest, LLMError, ModelInfo, Provider, http_get_json, http_post_json,
-    register,
+    ChatRequest, LLMError, ModelInfo, Provider, Reply, http_get_json,
+    http_post_json, openai_reply, register,
 )
 
 _ENDPOINT = "https://api.x.ai/v1/chat/completions"
@@ -90,12 +90,13 @@ class GrokProvider(Provider):
         return _extract_text(data)
 
 
-def _extract_text(data: dict) -> str:
+def _extract_text(data: dict) -> Reply:
     choices = data.get("choices") or []
     if not choices:
         raise LLMError("xAI returned no choices.")
-    content = (choices[0].get("message") or {}).get("content")
+    message = choices[0].get("message") or {}
+    content = message.get("content")
     if not content:
         finish = choices[0].get("finish_reason")
         raise LLMError(f"xAI returned an empty message (finish_reason={finish}).")
-    return content
+    return openai_reply(message, content, data.get("usage"), "xAI")
