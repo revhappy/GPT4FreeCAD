@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import List
 
 from .base import (
-    ChatRequest, LLMError, ModelInfo, Provider, http_get_json, http_post_json,
-    register,
+    ChatRequest, LLMError, ModelInfo, Provider, Reply, http_get_json,
+    http_post_json, register,
 )
 
 _ENDPOINT = "https://api.anthropic.com/v1/messages"
@@ -34,6 +34,14 @@ _MIN_THINKING_MAX_TOKENS = 16384
 # inside the same call instead of returning the refusal.
 _FALLBACK_PREFIXES = ("claude-fable-5", "claude-mythos", "claude-opus-5")
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+# Models that take adaptive thinking. Older Claude models want a fixed
+# budget_tokens instead, which is a different (and now deprecated) contract, so
+# they are simply left alone - no thinking parameter, no trace to show.
+_ADAPTIVE_THINKING_PREFIXES = (
+    "claude-fable-5", "claude-mythos", "claude-opus-5", "claude-opus-4-8",
+    "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-4-6",
+)
 
 
 @register
@@ -86,6 +94,11 @@ class AnthropicProvider(Provider):
             payload["temperature"] = request.temperature
         if system_text:
             payload["system"] = system_text
+        if model.startswith(_ADAPTIVE_THINKING_PREFIXES):
+            # These models think either way; "summarized" is what makes the
+            # reasoning readable instead of an empty block. Visibility is all it
+            # changes - the thinking happens, and is billed, regardless.
+            payload["thinking"] = {"type": "adaptive", "display": "summarized"}
 
         headers = {
             "x-api-key": api_key,
@@ -102,20 +115,32 @@ class AnthropicProvider(Provider):
         try:
             data = http_post_json(_ENDPOINT, payload, headers=headers, timeout=timeout)
         except LLMError as exc:
-            # If the org's key doesn't have the fallback beta, retry without it.
-            if "fallbacks" in payload and "fallback" in str(exc).lower():
+            # Both extras below are best-effort: a key without the fallback beta,
+            # or a model that turns out not to take adaptive thinking, should
+            # cost the request its garnish - not the whole generation.
+            message = str(exc).lower()
+            retry = False
+            if "fallbacks" in payload and "fallback" in message:
                 payload.pop("fallbacks", None)
                 headers.pop("anthropic-beta", None)
-                data = http_post_json(_ENDPOINT, payload, headers=headers, timeout=timeout)
-            else:
+                retry = True
+            if "thinking" in payload and "thinking" in message:
+                payload.pop("thinking", None)
+                retry = True
+            if not retry:
                 raise
-        return _extract_text(data)
+            data = http_post_json(_ENDPOINT, payload, headers=headers, timeout=timeout)
+        return _extract_reply(data)
 
 
-def _extract_text(data: dict) -> str:
+def _extract_reply(data: dict) -> Reply:
     stop = data.get("stop_reason")
     blocks = data.get("content") or []
     text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    # Thinking blocks are present whenever the model thought; their text is
+    # empty unless the request asked for it to be summarized.
+    reasoning = "\n\n".join(
+        b.get("thinking", "") for b in blocks if b.get("type") == "thinking")
     if not text:
         if stop == "refusal":
             raise LLMError(
@@ -123,4 +148,15 @@ def _extract_text(data: dict) -> str:
                 "Rephrase the description and try again."
             )
         raise LLMError(f"Claude returned no text (stop_reason={stop}).")
-    return text
+    return Reply(text, reasoning=reasoning, usage=_usage(data.get("usage")))
+
+
+def _usage(raw) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    usage = {"input": raw.get("input_tokens", 0),
+             "output": raw.get("output_tokens", 0)}
+    cached = raw.get("cache_read_input_tokens") or 0
+    if cached:
+        usage["cached"] = cached
+    return usage

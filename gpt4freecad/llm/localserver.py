@@ -14,8 +14,8 @@ from __future__ import annotations
 from typing import List, Optional
 
 from .base import (
-    ChatRequest, LLMError, ModelInfo, Provider, http_get_json, http_post_json,
-    register,
+    ChatRequest, LLMError, ModelInfo, Provider, Reply, http_get_json,
+    http_post_json, openai_reply, register,
 )
 
 # Where these servers listen out of the box. Probed in order.
@@ -90,7 +90,7 @@ class LocalServerProvider(Provider):
             )
         return [ModelInfo(id=m, name=m) for m in sorted(models)]
 
-    def chat(self, request: ChatRequest, api_key: str = "") -> str:
+    def chat(self, request: ChatRequest, api_key: str = "") -> Reply:
         payload = {
             "model": request.model,
             "messages": request.messages,
@@ -116,10 +116,11 @@ class LocalServerProvider(Provider):
         choices = data.get("choices") or []
         if not choices:
             raise LLMError(f"{self.label} returned no choices.")
-        content = (choices[0].get("message") or {}).get("content")
+        message = choices[0].get("message") or {}
+        content = message.get("content")
         if not content:
             finish = choices[0].get("finish_reason")
             raise LLMError(
                 f"{self.label} returned an empty message (finish_reason={finish})."
             )
-        return content
+        return openai_reply(message, content, data.get("usage"), self.label)

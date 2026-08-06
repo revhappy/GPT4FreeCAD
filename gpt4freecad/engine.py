@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from . import util
 from .cad import prompts, schema
-from .llm import ChatRequest, Provider, extract_json
+from .llm import ChatRequest, Provider, extract_json, reasoning_of, usage_of
 from .llm.base import LLMError
 
 
@@ -27,6 +27,15 @@ class GenerationResult:
     # Deterministic corrections applied to the model's reply before validating,
     # surfaced in the activity log so a silent fix is never actually silent.
     notes: List[str] = field(default_factory=list)
+    # What the model thought on the way to this answer, and what it cost. Both
+    # are reported by the provider when it can; empty when it cannot.
+    reasoning: str = ""
+    usage: Dict[str, int] = field(default_factory=dict)
+
+
+def _meta(reply) -> Dict[str, Any]:
+    """The reasoning/usage a provider attached to a reply, as result fields."""
+    return {"reasoning": reasoning_of(reply), "usage": usage_of(reply)}
 
 
 def generate(
@@ -43,26 +52,35 @@ def generate(
     thinking_level: Optional[str] = None,
     print_profile=None,
     part_layout: str = "fused",
+    system_prompt: Optional[str] = None,
 ) -> GenerationResult:
-    """Run one generation. Raises LLMError / SchemaError on unrecoverable failure."""
+    """Run one generation. Raises LLMError / SchemaError on unrecoverable failure.
+
+    ``system_prompt`` replaces the generated instructions verbatim when set -
+    the escape hatch for a user who wants to steer the model directly. Everything
+    downstream still validates, so a bad prompt fails loudly rather than quietly
+    building the wrong thing.
+    """
     history = list(history or [])
 
     if mode == "python":
         return _generate_python(
             provider, api_key, model, description, history,
-            temperature, max_tokens, thinking_level,
+            temperature, max_tokens, thinking_level, system_prompt,
         )
     return _generate_structured(
         provider, api_key, model, description, history,
         units, temperature, max_tokens, thinking_level,
         engineering=(mode == "engineering"), print_profile=print_profile,
-        part_layout=part_layout,
+        part_layout=part_layout, system_prompt=system_prompt,
     )
 
 
 def _generate_python(provider, api_key, model, description, history,
-                     temperature, max_tokens, thinking_level):
-    messages = [{"role": "system", "content": prompts.PYTHON_SYSTEM_PROMPT}]
+                     temperature, max_tokens, thinking_level,
+                     system_prompt=None):
+    system = system_prompt or prompts.PYTHON_SYSTEM_PROMPT
+    messages = [{"role": "system", "content": system}]
     messages += history
     messages.append({"role": "user", "content": description})
 
@@ -74,15 +92,17 @@ def _generate_python(provider, api_key, model, description, history,
     code = util.extract_code(raw)
     if not code:
         raise LLMError("Model reply contained no Python code.")
-    return GenerationResult(mode="python", raw=raw, code=code, messages=messages)
+    return GenerationResult(mode="python", raw=raw, code=code, messages=messages,
+                            **_meta(raw))
 
 
 def _generate_structured(
     provider, api_key, model, description, history,
     units, temperature, max_tokens, thinking_level,
     engineering=False, print_profile=None, part_layout="fused",
+    system_prompt=None,
 ):
-    system = prompts.system_prompt(
+    system = system_prompt or prompts.system_prompt(
         units, engineering=engineering, print_profile=print_profile,
         part_layout=part_layout)
     messages = [{"role": "system", "content": system}]
@@ -100,7 +120,7 @@ def _generate_structured(
     try:
         program, notes = _validated_program(raw)
         return GenerationResult(mode="structured", raw=raw, program=program,
-                                messages=messages, notes=notes)
+                                messages=messages, notes=notes, **_meta(raw))
     except (LLMError, schema.SchemaError) as first_error:
         # One automatic repair attempt: show the model its own output + the error.
         repair_messages = messages + [
@@ -123,7 +143,7 @@ def _generate_structured(
             raise
         return GenerationResult(
             mode="structured", raw=raw2, program=program, repaired=True,
-            messages=messages, notes=notes
+            messages=messages, notes=notes, **_meta(raw2)
         )
 
 
@@ -156,17 +176,21 @@ def generate_step(
     max_tokens: int = 4096,
     thinking_level: Optional[str] = None,
     part_layout: str = "fused",
+    system_prompt: Optional[str] = None,
 ) -> GenerationResult:
     """Generate ONLY the next operation(s) to append to an existing program.
 
     Returns a :class:`GenerationResult` whose ``program`` holds just the new ops.
     The combined (existing + new) program is validated so references and unique
     names are guaranteed. One automatic repair attempt on failure.
+
+    ``system_prompt`` replaces the standing instructions only; the program built
+    so far is always appended, so a custom prompt cannot cost a step its context.
     """
     program = list(program or [])
     system = prompts.step_system_prompt(
         units, program, engineering=engineering, print_profile=print_profile,
-        part_layout=part_layout
+        part_layout=part_layout, base=system_prompt or ""
     )
     messages = [
         {"role": "system", "content": system},
@@ -182,7 +206,7 @@ def generate_step(
     try:
         new_ops, notes = _extract_new_ops(raw, program)
         return GenerationResult(mode="engineering", raw=raw, program=new_ops,
-                                messages=messages, notes=notes)
+                                messages=messages, notes=notes, **_meta(raw))
     except (LLMError, schema.SchemaError) as first_error:
         repair_messages = messages + [
             {"role": "assistant", "content": raw},
@@ -202,7 +226,7 @@ def generate_step(
             raise
         return GenerationResult(
             mode="engineering", raw=raw2, program=new_ops, repaired=True,
-            messages=messages, notes=notes
+            messages=messages, notes=notes, **_meta(raw2)
         )
 
 

@@ -26,7 +26,10 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
-from .base import ChatRequest, LLMError, Provider, register
+from .base import (
+    ChatRequest, LLMError, Provider, Reply, openai_usage, register,
+    split_think_tags,
+)
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8177"
 
@@ -51,7 +54,7 @@ class MachineProvider(Provider):
     model_path = ""
 
     # ------------------------------------------------------------------ #
-    def chat(self, request: ChatRequest, api_key: str = "") -> str:
+    def chat(self, request: ChatRequest, api_key: str = "") -> Reply:
         """Run one local chat turn. ``api_key`` is accepted but unused."""
         timeout = max(request.timeout, _MIN_TIMEOUT)
         # Activate first if needed. Generation already runs on a background
@@ -216,7 +219,7 @@ def _sdk_client(base_url: str, timeout: float):
 # report, which is a thing only `machine serve` can answer.
 # --------------------------------------------------------------------------- #
 def _chat_via_http(base_url: str, request: ChatRequest,
-                   schema: Optional[dict], timeout: int) -> str:
+                   schema: Optional[dict], timeout: int) -> Reply:
     payload = {
         "messages": list(request.messages),
         "temperature": request.temperature,
@@ -277,19 +280,36 @@ def _grammar_for(schema: dict) -> str:
     return grammar
 
 
-def _content_of(data: dict, required: bool = True) -> str:
+def _content_of(data: dict, required: bool = True) -> Reply:
+    """The reply, as a :class:`Reply` whose emptiness the caller can test.
+
+    ``Reply`` is a ``str``, so the schema fallbacks upstream keep using it as a
+    truthiness check for "this server gave us nothing".
+    """
     choices = data.get("choices") or []
     if not choices:
         if required:
             raise LLMError("The local model server returned no choices.")
-        return ""
-    content = (choices[0].get("message") or {}).get("content") or ""
-    if not content and required:
+        return Reply("")
+    message = choices[0].get("message") or {}
+    content = message.get("content") or ""
+    # GGUF chat templates put the model's reasoning inline in <think> tags.
+    # Splitting it out is what keeps it from reaching the JSON parser.
+    text, inline = split_think_tags(content)
+    reasoning = "\n\n".join(
+        p for p in ((message.get("reasoning_content") or "").strip(), inline) if p)
+    if not text and required:
         finish = choices[0].get("finish_reason")
+        if reasoning:
+            raise LLMError(
+                "The local model spent its whole token budget thinking and never "
+                "answered. Raise 'Max tokens' in Settings, or lower the thinking "
+                "level of the model you loaded."
+            )
         raise LLMError(
             f"The local model returned an empty message (finish_reason={finish})."
         )
-    return content
+    return Reply(text, reasoning=reasoning, usage=openai_usage(data.get("usage")))
 
 
 def _opener():

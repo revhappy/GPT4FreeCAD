@@ -116,11 +116,13 @@ class EngineeringWidget(QtWidgets.QWidget):
             units=ctx["units"], engineering=True, print_profile=ctx["print_profile"],
             temperature=ctx["temperature"], max_tokens=ctx["max_tokens"],
             thinking_level=ctx["thinking_level"], part_layout=ctx["part_layout"],
+            system_prompt=ctx["system_prompt"],
         )
         self.host._set_status("Asking for the next step…")
         self.host.run_worker(fn, self._on_step_generated)
 
     def _on_step_generated(self, result):
+        self.host.show_reasoning(result)
         new_ops = list(result.program or [])
         if not new_ops:
             self.host._log_error("Model returned no new operations.")
@@ -165,6 +167,7 @@ class EngineeringWidget(QtWidgets.QWidget):
             units=ctx["units"], engineering=True, print_profile=ctx["print_profile"],
             temperature=ctx["temperature"], max_tokens=ctx["max_tokens"],
             thinking_level=ctx["thinking_level"], part_layout=ctx["part_layout"],
+            system_prompt=ctx["system_prompt"],
         )
         self.host._set_status(
             f"Step failed - asking the model for a fix (round {repair.round_label})…")

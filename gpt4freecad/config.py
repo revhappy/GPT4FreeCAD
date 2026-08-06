@@ -273,6 +273,41 @@ class Config:
     def set_repair_rounds(self, value: int) -> None:
         self._b.set_int("repair_rounds", max(0, min(int(value), 10)))
 
+    # --- prompt overrides -------------------------------------------------- #
+    def system_prompt(self, mode: str) -> str:
+        """The user's own system prompt for ``mode``, or "" to use the built-in.
+
+        Stored per mode because the three modes ask the model for different
+        things - a prompt written for the JSON schema is not one that produces
+        Python.
+        """
+        return self._b.get_str(f"system_prompt_{mode}", "")
+
+    def set_system_prompt(self, mode: str, text: str) -> None:
+        self._b.set_str(f"system_prompt_{mode}", (text or "").strip())
+
+    # --- FreeCAD integration ---------------------------------------------- #
+    def auto_show_panel(self) -> bool:
+        """Open the panel when FreeCAD starts, without switching workbenches."""
+        return self._b.get_bool("auto_show_panel", True)
+
+    def set_auto_show_panel(self, value: bool) -> None:
+        self._b.set_bool("auto_show_panel", value)
+
+    def global_toolbar(self) -> bool:
+        """Keep the GPT4FreeCAD toolbar visible in every workbench."""
+        return self._b.get_bool("global_toolbar", True)
+
+    def set_global_toolbar(self, value: bool) -> None:
+        self._b.set_bool("global_toolbar", value)
+
+    def previous_start_workbench(self) -> str:
+        """Whatever FreeCAD started with before we took over AutoloadModule."""
+        return self._b.get_str("previous_start_workbench", "")
+
+    def set_previous_start_workbench(self, value: str) -> None:
+        self._b.set_str("previous_start_workbench", value or "")
+
     # --- legacy migration ------------------------------------------------- #
     def _migrate_legacy_key(self) -> None:
         if self._b.get_bool("migrated_legacy", False):
