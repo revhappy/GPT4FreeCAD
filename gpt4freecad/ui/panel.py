@@ -607,6 +607,8 @@ class GPTPanel(QtWidgets.QWidget):
             self.preview.setPlainText(json.dumps({"operations": result.program}, indent=2))
             note = " (auto-repaired)" if result.repaired else ""
             self._log_system(f"Generated a plan with {len(result.program)} operation(s){note}.")
+            for fix in getattr(result, "notes", ()):
+                self._log_system(f"note: {fix}")
         else:
             self.preview.setPlainText(result.code or "")
             self._log_system(f"Generated Python ({len((result.code or '').splitlines())} lines).")

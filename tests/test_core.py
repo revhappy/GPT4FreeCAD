@@ -21,12 +21,14 @@ from gpt4freecad.config import Config, _JsonBackend
 from gpt4freecad import engine, harness, util
 from gpt4freecad.llm import (
     all_providers, get_provider, extract_json, ChatRequest, LLMError, ModelInfo,
+    AuthError,
 )
 from gpt4freecad.llm import openai as openai_mod
 from gpt4freecad.llm import anthropic as anthropic_mod
 from gpt4freecad.llm import gemini as gemini_mod
 from gpt4freecad.llm import local as local_mod
 from gpt4freecad.llm import openrouter as openrouter_mod
+from gpt4freecad.llm import grok as grok_mod
 
 
 def expect_error(fn, exc=Exception):
@@ -1743,6 +1745,223 @@ def test_scanning_a_missing_directory_is_not_an_error():
     from gpt4freecad.llm import discovery
 
     assert discovery.scan_roots([("/definitely/not/here", "Nope")]) == []
+
+
+# --------------------------------------------------------------------------- #
+# name collisions
+#
+# Engineering mode appends, so asking to change something that already exists
+# makes the model reuse its name. Failing the step for that is the protocol's
+# fault, not the user's.
+# --------------------------------------------------------------------------- #
+def test_a_reused_name_is_renamed_rather_than_rejected():
+    """The reported case: 'a hole bored in the centre', then 'bore it through'."""
+    program = [
+        {"op": "cylinder", "name": "disk", "radius": 20, "height": 5},
+        {"op": "hole", "name": "hole", "target": "disk", "diameter": 6,
+         "depth": 5, "position": [0, 0, 5]},
+    ]
+    new = [{"op": "hole", "name": "hole", "target": "hole", "diameter": 6,
+            "depth": 10, "position": [0, 0, 5], "through": True}]
+    fixed, notes = schema.dedupe_names(new, ["disk", "hole"])
+    assert fixed[0]["name"] == "hole_2"
+    # The target still means the object that already existed, not itself.
+    assert fixed[0]["target"] == "hole"
+    assert "renamed 'hole' to 'hole_2'" in notes[0]
+    schema.validate_program({"operations": program + fixed})
+
+
+def test_a_rename_follows_references_made_in_the_same_batch():
+    batch = [
+        {"op": "box", "name": "disk", "length": 1, "width": 1, "height": 1},
+        {"op": "fillet", "name": "round", "target": "disk", "radius": 0.1},
+    ]
+    fixed, _notes = schema.dedupe_names(batch, ["disk"])
+    assert fixed[0]["name"] == "disk_2"
+    assert fixed[1]["target"] == "disk_2"   # this one *does* mean the new box
+
+
+def test_renaming_leaves_the_input_untouched():
+    original = [{"op": "box", "name": "a", "length": 1, "width": 1, "height": 1}]
+    fixed, _ = schema.dedupe_names(original, ["a"])
+    assert original[0]["name"] == "a" and fixed[0]["name"] == "a_2"
+
+
+def test_renaming_counts_up_past_names_already_taken():
+    ops = [{"op": "box", "name": "hole_2", "length": 1, "width": 1, "height": 1}]
+    fixed, _ = schema.dedupe_names(ops, ["hole", "hole_2", "hole_3"])
+    assert fixed[0]["name"] == "hole_4"
+
+
+def test_nothing_is_renamed_when_there_is_no_collision():
+    ops = [{"op": "box", "name": "fresh", "length": 1, "width": 1, "height": 1}]
+    fixed, notes = schema.dedupe_names(ops, ["other"])
+    assert fixed[0]["name"] == "fresh" and notes == []
+
+
+def test_a_duplicate_inside_one_program_is_renamed_too():
+    ops = [
+        {"op": "box", "name": "part", "length": 1, "width": 1, "height": 1},
+        {"op": "cylinder", "name": "part", "radius": 1, "height": 1},
+    ]
+    fixed, notes = schema.dedupe_names(ops)
+    assert [o["name"] for o in fixed] == ["part", "part_2"]
+    assert len(notes) == 1
+    schema.validate_program({"operations": fixed})
+
+
+# --------------------------------------------------------------------------- #
+# strict schema (structured outputs)
+# --------------------------------------------------------------------------- #
+def _strict_violations(node, path="root"):
+    """Everywhere the schema breaks an OpenAI-style strict-mode rule."""
+    bad = []
+    if isinstance(node, dict):
+        if node.get("type") == "object":
+            if node.get("additionalProperties") is not False:
+                bad.append(f"{path}: additionalProperties is not false")
+            if set(node.get("properties") or {}) != set(node.get("required") or {}):
+                bad.append(f"{path}: required does not list every property")
+        for keyword in ("minItems", "maxItems", "minLength"):
+            if keyword in node:
+                bad.append(f"{path}: has {keyword}")
+        for key, value in node.items():
+            bad += _strict_violations(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            bad += _strict_violations(value, f"{path}[{index}]")
+    return bad
+
+
+def test_the_strict_schema_obeys_structured_output_rules():
+    assert _strict_violations(schema.json_schema(strict=True)) == []
+
+
+def test_the_strict_schema_still_covers_every_operation():
+    strict = schema.json_schema(strict=True)
+    branches = strict["properties"]["operations"]["items"]["anyOf"]
+    assert len(branches) == len(schema.OPERATIONS)
+    names = {b["properties"]["op"]["enum"][0] for b in branches}
+    assert names == set(schema.OPERATIONS)
+
+
+def test_the_permissive_schema_is_unchanged_by_the_strict_one():
+    permissive = schema.json_schema()
+    assert permissive["properties"]["operations"]["minItems"] == 1
+    assert permissive["$schema"]
+    branch = permissive["properties"]["operations"]["items"]["anyOf"][0]
+    assert branch["additionalProperties"] is True
+
+
+def test_a_strict_reply_full_of_nulls_still_validates():
+    """Strict mode has no optional properties, so a model must send nulls.
+
+    Absent and null have to mean the same thing or every structured-output
+    reply would be rejected by the validator that follows it.
+    """
+    ops = schema.validate_program({"operations": [
+        {"op": "cylinder", "name": "disk", "radius": 20, "height": 5,
+         "angle": None, "placement": None},
+        {"op": "hole", "name": "bore", "target": "disk", "diameter": 6,
+         "depth": 5, "position": [0, 0, 5], "through": None, "axis": None,
+         "cbore_diameter": None, "cbore_depth": None,
+         "csink_diameter": None, "csink_angle": None},
+    ]})
+    assert len(ops) == 2
+
+
+def test_a_null_inside_a_placement_means_not_given():
+    schema.validate_program({"operations": [
+        {"op": "box", "name": "a", "length": 1, "width": 1, "height": 1,
+         "placement": {"pos": [1, 2, 3], "rotation": None}},
+        {"op": "box", "name": "b", "length": 1, "width": 1, "height": 1,
+         "placement": {"pos": None, "rotation": {"axis": [0, 0, 1], "angle": 45}}},
+    ]})
+
+
+# --------------------------------------------------------------------------- #
+# OpenRouter structured output + Grok
+# --------------------------------------------------------------------------- #
+def test_openrouter_sends_the_strict_schema_when_it_has_one():
+    captured = _patch(openrouter_mod, {"choices": [{"message": {"content": "{}"}}]})
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}],
+                      model="strict/model", json_mode=True,
+                      json_schema={"permissive": True},
+                      json_schema_strict=schema.json_schema(strict=True))
+    get_provider("openrouter").chat(req, "sk-or")
+    fmt = captured["payload"]["response_format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["strict"] is True
+    # The permissive flavour is for the local grammar path, never the wire.
+    assert fmt["json_schema"]["schema"] != {"permissive": True}
+
+
+def test_openrouter_downgrades_once_when_a_model_rejects_the_schema():
+    calls = []
+
+    def fake(url, payload, headers=None, timeout=120):
+        calls.append(payload.get("response_format", {}).get("type"))
+        if len(calls) == 1:
+            raise LLMError("HTTP 400: model does not support response_format")
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    openrouter_mod.http_post_json = fake
+    openrouter_mod._NO_SCHEMA.discard("picky/model")
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}],
+                      model="picky/model", json_mode=True,
+                      json_schema_strict=schema.json_schema(strict=True))
+    assert get_provider("openrouter").chat(req, "k") == "ok"
+    assert calls == ["json_schema", "json_object"]
+    # Remembered, so the next generation does not pay for the discovery again.
+    get_provider("openrouter").chat(req, "k")
+    assert calls == ["json_schema", "json_object", "json_object"]
+    openrouter_mod._NO_SCHEMA.discard("picky/model")
+
+
+def test_openrouter_does_not_downgrade_a_bad_key():
+    """An auth failure is not the schema's fault; retrying hides the real cause."""
+    def fake(url, payload, headers=None, timeout=120):
+        raise AuthError("HTTP 401: invalid api key")
+
+    openrouter_mod.http_post_json = fake
+    openrouter_mod._NO_SCHEMA.discard("fine/model")
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}],
+                      model="fine/model", json_mode=True,
+                      json_schema_strict=schema.json_schema(strict=True))
+    expect_error(lambda: get_provider("openrouter").chat(req, "bad"), AuthError)
+    assert "fine/model" not in openrouter_mod._NO_SCHEMA
+
+
+def test_grok_request_uses_the_strict_schema():
+    captured = _patch(grok_mod, {"choices": [{"message": {"content": "ok"}}]})
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}],
+                      model="grok-4", json_mode=True, max_tokens=100,
+                      json_schema_strict=schema.json_schema(strict=True))
+    assert get_provider("grok").chat(req, "xai-key") == "ok"
+    assert captured["headers"]["Authorization"] == "Bearer xai-key"
+    assert "x.ai" in captured["url"]
+    assert captured["payload"]["response_format"]["type"] == "json_schema"
+    assert captured["payload"]["max_tokens"] == 100
+
+
+def test_grok_reasoning_models_get_a_token_floor():
+    captured = _patch(grok_mod, {"choices": [{"message": {"content": "ok"}}]})
+    req = ChatRequest(messages=[{"role": "user", "content": "hi"}],
+                      model="grok-3-mini", max_tokens=4096)
+    get_provider("grok").chat(req, "xai-key")
+    assert captured["payload"]["max_tokens"] == 16384
+
+
+def test_grok_catalogue_drops_image_models():
+    _patch_get(grok_mod, {"data": [
+        {"id": "grok-4", "created": 200},
+        {"id": "grok-2-image-1212", "created": 100},
+    ]})
+    assert [m.id for m in get_provider("grok").fetch_models("k")] == ["grok-4"]
+
+
+def test_grok_needs_a_key():
+    expect_error(lambda: get_provider("grok").fetch_models(""), LLMError)
 
 
 # --------------------------------------------------------------------------- #

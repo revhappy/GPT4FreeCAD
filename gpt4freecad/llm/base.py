@@ -56,6 +56,12 @@ class ChatRequest:
     # models enforce it as a grammar (so malformed output is impossible); cloud
     # providers that have no equivalent simply ignore it.
     json_schema: Optional[Dict[str, Any]] = None
+    # The same schema in the dialect OpenAI-style structured outputs require
+    # (closed objects, every property required, nullable instead of optional).
+    # Carried separately because the two are not interchangeable: the grammar
+    # path wants the precise one, and strict mode refuses it. Providers take
+    # whichever they can enforce, so the llm layer stays free of any CAD import.
+    json_schema_strict: Optional[Dict[str, Any]] = None
 
     def split_system(self) -> "tuple[str, List[Dict[str, str]]]":
         """Return ``(system_text, non_system_messages)``.

@@ -254,12 +254,16 @@ def _check_field(op: str, field: str, kind: str, value: Any, allowed=None) -> No
 
 
 def _check_placement(op: str, value: Any) -> None:
+    # A null member means "not given". Strict structured outputs have no
+    # optional properties - every one must be present, so a model using them
+    # says {"pos": [...], "rotation": null} where a plain JSON reply would have
+    # omitted rotation entirely. The two must mean the same thing.
     if not isinstance(value, dict):
         raise SchemaError(f"operation '{op}', field 'placement' must be an object.")
-    if "pos" in value:
+    if value.get("pos") is not None:
         _check_field(op, "placement.pos", VEC3, value["pos"])
-    if "rotation" in value:
-        rot = value["rotation"]
+    rot = value.get("rotation")
+    if rot is not None:
         if not isinstance(rot, dict):
             raise SchemaError(f"operation '{op}', 'placement.rotation' must be an object.")
         _check_field(op, "placement.rotation.axis", VEC3, rot.get("axis"))
@@ -535,6 +539,74 @@ def validate_op(op: Dict[str, Any], defined_names=()) -> Dict[str, Any]:
     return op
 
 
+def dedupe_names(operations: List[Dict[str, Any]],
+                 taken=()) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Rename operations whose object name is already in use.
+
+    Every name in a program has to be unique, and in step mode the protocol
+    itself guarantees collisions: the model is asked for the operations to
+    *append*, so "bore the hole through" naturally comes back defining 'hole'
+    again. Failing the step for that is the addon's problem to solve, not the
+    user's, and it is solvable without spending a request - the fix is the same
+    every time.
+
+    References are rewritten only when they point at a name defined earlier in
+    this same batch. A reference to a name that already existed still means the
+    original object, which is what makes the common case correct: an op named
+    'hole' whose target is 'hole' becomes 'hole_2' cut from the original 'hole'.
+
+    Returns ``(operations, notes)`` with the input left untouched.
+    """
+    used = set(taken)
+    renamed: Dict[str, str] = {}
+    out: List[Dict[str, Any]] = []
+    notes: List[str] = []
+
+    for op in operations or []:
+        spec = OPERATIONS.get(op.get("op"))
+        if spec is None:
+            out.append(op)
+            continue
+        op = dict(op)
+
+        # Point references at this batch's renamed objects, never at earlier ones.
+        for ref_field in spec["refs"]:
+            value = op.get(ref_field)
+            if isinstance(value, list):
+                op[ref_field] = [renamed.get(n, n) if isinstance(n, str) else n
+                                 for n in value]
+            elif isinstance(value, str) and value in renamed:
+                op[ref_field] = renamed[value]
+
+        name = op.get("name")
+        if spec["defines"] and isinstance(name, str):
+            if name in used:
+                fresh = _unused_name(name, used)
+                notes.append(f"renamed '{name}' to '{fresh}' - that name was "
+                             "already taken by an earlier step")
+                renamed[name] = fresh
+                op["name"] = fresh
+                name = fresh
+            used.add(name)
+        out.append(op)
+    return out, notes
+
+
+def _unused_name(name: str, used) -> str:
+    """'hole' -> 'hole_2' -> 'hole_3' ... the first one nothing else claims."""
+    stem = name
+    start = 2
+    if "_" in name:
+        head, _, tail = name.rpartition("_")
+        if head and tail.isdigit():
+            stem, start = head, int(tail) + 1
+    for suffix in range(start, start + 1000):
+        candidate = f"{stem}_{suffix}"
+        if candidate not in used:
+            return candidate
+    raise SchemaError(f"Could not find an unused name based on '{name}'.")
+
+
 def leaf_names(operations: List[Dict[str, Any]]) -> List[str]:
     """Objects that no later operation consumes - the program's end products.
 
@@ -594,11 +666,28 @@ _PLACEMENT_SCHEMA = {
 }
 
 
-def _field_schema(kind: str, allowed=None) -> Dict[str, Any]:
+def _strip_bounds(node: Any) -> Any:
+    """Drop the size keywords strict mode rejects, recursively.
+
+    ``minItems``/``maxItems``/``minLength`` are how the permissive schema pins a
+    vec3 to three numbers. OpenAI-style strict mode refuses a schema containing
+    them, so the strict flavour gives them up; :func:`validate_program` still
+    checks every one of them after the reply arrives, so nothing is actually
+    unchecked - the model just is not prevented from getting it wrong.
+    """
+    if isinstance(node, dict):
+        return {k: _strip_bounds(v) for k, v in node.items()
+                if k not in ("minItems", "maxItems", "minLength")}
+    if isinstance(node, list):
+        return [_strip_bounds(v) for v in node]
+    return node
+
+
+def _field_schema(kind: str, allowed=None, strict: bool = False) -> Dict[str, Any]:
     """JSON Schema for one IR field type token."""
     if kind == ENUM:
         return {"enum": list(allowed or [])}
-    return {
+    schema = {
         NUMBER: {"type": "number"},
         INT: {"type": "integer"},
         BOOL: {"type": "boolean"},
@@ -614,15 +703,56 @@ def _field_schema(kind: str, allowed=None) -> Dict[str, Any]:
         },
         PLACEMENT: _PLACEMENT_SCHEMA,
     }.get(kind, {})
+    if strict:
+        schema = _strip_bounds(schema)
+        if kind == PLACEMENT:
+            # Strict mode wants every object closed and every property required.
+            schema = {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["pos", "rotation"],
+                "properties": {
+                    "pos": _nullable(_strip_bounds(_VEC3_SCHEMA)),
+                    "rotation": _nullable({
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["axis", "angle"],
+                        "properties": {
+                            "axis": _strip_bounds(_VEC3_SCHEMA),
+                            "angle": {"type": "number"},
+                        },
+                    }),
+                },
+            }
+    return schema
 
 
-def _op_schema(op: str, spec: Dict[str, Any]) -> Dict[str, Any]:
+def _nullable(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Strict mode has no optional properties, only ones that may be null.
+
+    ``validate_program`` already skips an optional field whose value is None, so
+    a model answering ``"angle": null`` is treated exactly as one that omitted it.
+    """
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+def _op_schema(op: str, spec: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
     enums = spec.get("enums", {})
-    properties: Dict[str, Any] = {"op": {"const": op}}
+    properties: Dict[str, Any] = {"op": {"enum": [op]} if strict else {"const": op}}
     for field, kind in spec["required"].items():
-        properties[field] = _field_schema(kind, enums.get(field))
+        properties[field] = _field_schema(kind, enums.get(field), strict)
     for field, kind in spec["optional"].items():
-        properties[field] = _field_schema(kind, enums.get(field))
+        field_schema = _field_schema(kind, enums.get(field), strict)
+        properties[field] = _nullable(field_schema) if strict else field_schema
+    if strict:
+        return {
+            "type": "object",
+            # Strict mode requires every property to be listed as required;
+            # optional ones are nullable instead (see _nullable).
+            "required": list(properties.keys()),
+            "properties": properties,
+            "additionalProperties": False,
+        }
     return {
         "type": "object",
         "required": ["op", *spec["required"].keys()],
@@ -632,7 +762,7 @@ def _op_schema(op: str, spec: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def json_schema() -> Dict[str, Any]:
+def json_schema(strict: bool = False) -> Dict[str, Any]:
     """A JSON schema describing a valid program.
 
     One branch per operation, carrying that op's *required* fields - so a
@@ -642,21 +772,32 @@ def json_schema() -> Dict[str, Any]:
     return ``{"op": "box"}`` with no name or size: accepted by the grammar, then
     rejected by :func:`validate_program`. Derived from :data:`OPERATIONS` so the
     schema, the validator and the prompt reference cannot drift apart.
+
+    ``strict=True`` returns the dialect OpenAI-style *structured outputs* accept
+    (every object closed, every property required, optional properties nullable,
+    no size keywords). It constrains a little less than the permissive flavour,
+    but it is the difference between a provider enforcing the shape and merely
+    being asked for JSON.
     """
-    return {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "GPT4FreeCAD program",
+    program = {
         "type": "object",
         "required": ["operations"],
         "properties": {
             "operations": {
                 "type": "array",
                 "minItems": 1,
-                "items": {"anyOf": [_op_schema(op, spec)
+                "items": {"anyOf": [_op_schema(op, spec, strict)
                                     for op, spec in OPERATIONS.items()]},
             }
         },
     }
+    if strict:
+        program["additionalProperties"] = False
+        program["properties"]["operations"].pop("minItems")
+        return program
+    program["$schema"] = "http://json-schema.org/draft-07/schema#"
+    program["title"] = "GPT4FreeCAD program"
+    return program
 
 
 def example_program() -> Dict[str, Any]:

@@ -1,7 +1,8 @@
 # GPT4FreeCAD
 
 Generate **parametric** FreeCAD geometry from plain English — powered by your choice of
-**Google Gemini, OpenAI, Anthropic Claude, or a local model on your own machine**.
+**Google Gemini, OpenAI, Anthropic Claude, xAI Grok, OpenRouter's several hundred models,
+or a local model on your own machine**.
 
 ![Workbench Logo](logo.svg)
 
@@ -111,6 +112,20 @@ Generate **parametric** FreeCAD geometry from plain English — powered by your 
 >   the list is only things that can actually hold a conversation.
 > - **Structured mode filters for it.** The picker defaults to models that support a JSON
 >   response, because a model that cannot be asked for one fails every single generation.
+>
+> **New in 2.7 — schema enforcement beyond the local model, and fewer pointless failures:**
+> - **Renaming a feature no longer fails.** Engineering mode appends, so asking to change
+>   something that exists made the model reuse its name — "a hole bored in the centre",
+>   then "bore the hole through", and the step died on *object name 'hole' is already
+>   used*. The append-only protocol creates that collision, so the addon now fixes it:
+>   `hole` becomes `hole_2`, with a note, and no request is spent on it.
+> - **A hole that misses the material is caught.** Asking only "did it remove anything"
+>   let a 6 mm hole take 0.28 mm³ out of 6283 and call it a success. Holes are now
+>   measured against the volume the drill actually sweeps.
+> - **OpenRouter enforces the schema**, not just "please reply in JSON" — 263 of its 340
+>   models accept a strict JSON schema, and the rest downgrade automatically after one
+>   request. The same guarantee local models get from grammar enforcement.
+> - **xAI (Grok)** joins as a provider, with its own key and live model list.
 
 ---
 
@@ -323,7 +338,7 @@ gpt4freecad/
 ├── util.py            small shared helpers                               (pure)
 ├── llm/               provider abstraction                               (pure)
 │   ├── base.py        Provider ABC, HTTP, JSON extraction, ModelInfo, registry
-│   ├── gemini.py  ·  openai.py  ·  anthropic.py  ·  openrouter.py
+│   ├── gemini.py · openai.py · anthropic.py · openrouter.py · grok.py
 │   ├── local.py       Machine Activation SDK: local GGUF models, no key
 │   ├── localserver.py Ollama / LM Studio: attach to a server you already run
 │   ├── discovery.py   find GGUF models already downloaded on this PC   (pure)

@@ -82,27 +82,76 @@ class OpenRouterProvider(Provider):
         if not api_key:
             raise LLMError("No OpenRouter API key set. Open Settings to add one.")
 
-        payload = {
-            "model": request.model,
-            "messages": request.messages,
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
-        }
-        if request.json_mode:
-            # json_object, not a strict json_schema: the addon's schema uses
-            # minItems/minLength and permissive additionalProperties, which
-            # strict mode rejects. Sending the schema needs the sanitised
-            # variant tracked as IDEAS.md #3.
-            payload["response_format"] = {"type": "json_object"}
-
         headers = {
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": _REFERER,
             "X-Title": _TITLE,
         }
-        data = http_post_json(_ENDPOINT, payload, headers=headers,
-                              timeout=max(request.timeout, 180))
+        timeout = max(request.timeout, 180)
+        strict = request.json_schema_strict
+        schema_wanted = (request.json_mode and strict
+                         and request.model not in _NO_SCHEMA)
+
+        if schema_wanted:
+            try:
+                data = http_post_json(
+                    _ENDPOINT, _payload(request, strict),
+                    headers=headers, timeout=timeout)
+                return _extract_text(data)
+            except LLMError as exc:
+                if not _is_schema_rejection(exc):
+                    raise
+                # Capability is advertised per model and not every backing
+                # provider honours it. Downgrade once, remember, carry on -
+                # better than failing a generation over a response_format.
+                _NO_SCHEMA.add(request.model)
+
+        data = http_post_json(_ENDPOINT, _payload(request, None),
+                              headers=headers, timeout=timeout)
         return _extract_text(data)
+
+
+# Models that turned out not to accept a json_schema after all. Session-scoped:
+# the downgrade costs one request the first time and nothing afterwards.
+_NO_SCHEMA: set = set()
+
+
+def _payload(request: ChatRequest, json_schema) -> dict:
+    payload = {
+        "model": request.model,
+        "messages": request.messages,
+        "max_tokens": request.max_tokens,
+        "temperature": request.temperature,
+    }
+    if json_schema:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "cad_program",
+                "strict": True,
+                "schema": json_schema,
+            },
+        }
+    elif request.json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    return payload
+
+
+def _is_schema_rejection(exc: LLMError) -> bool:
+    """True when the failure is about response_format rather than the request.
+
+    A model that cannot do structured output says so in a 400; a bad key, a
+    dead network or an out-of-credit account must not be retried as if the
+    schema were the problem.
+    """
+    if getattr(exc, "transient", False):
+        return False
+    text = str(exc).lower()
+    if not text.startswith("http 4"):
+        return False
+    return any(word in text for word in (
+        "response_format", "json_schema", "schema", "structured output",
+        "does not support"))
 
 
 def _extract_text(data: dict) -> str:
