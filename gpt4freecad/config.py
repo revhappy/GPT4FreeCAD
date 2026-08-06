@@ -159,6 +159,15 @@ class Config:
     def set_openai_endpoint(self, url: str) -> None:
         self._b.set_str("openai_endpoint", url)
 
+    def localserver_base_url(self) -> str:
+        """Where Ollama / LM Studio is listening (default: Ollama's port)."""
+        return self._b.get_str(
+            "localserver_base_url", "http://127.0.0.1:11434").strip() \
+            or "http://127.0.0.1:11434"
+
+    def set_localserver_base_url(self, url: str) -> None:
+        self._b.set_str("localserver_base_url", (url or "").strip())
+
     def machine_base_url(self) -> str:
         """Base URL of the local `machine serve` inference server."""
         return self._b.get_str("machine_base_url", "http://127.0.0.1:8177").strip() \

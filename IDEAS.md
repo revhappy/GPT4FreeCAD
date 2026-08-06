@@ -36,6 +36,14 @@ variant (Anthropic/OpenAI strict mode requires `additionalProperties: false` and
 the same one grammar enforcement gave local models: whole classes of repair rounds stop
 happening.
 
+2.6.0 raised the value of this: OpenRouter is now a provider, and **263 of its 340
+models advertise `structured_outputs`** (286 advertise `response_format`). Its adapter
+sends `{"type": "json_object"}` today and carries a note pointing here — the sanitised
+schema variant is the one thing standing between the addon and schema enforcement across
+almost the entire open-weight ecosystem, not just three cloud vendors. The picker already
+records the capability per model (`ModelInfo.json_mode`), so the plumbing to *choose* an
+enforcing model exists.
+
 ## 4. Visual feedback loop + image input
 CAD Skills mandates a snapshot after every build so the agent can *see* its work.
 - **Snapshot self-check**: after a build, capture the viewport

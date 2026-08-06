@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from .base import ChatRequest, LLMError, Provider, http_post_json, register
+from typing import List
+
+from .base import (
+    ChatRequest, LLMError, ModelInfo, Provider, http_get_json, http_post_json,
+    register,
+)
 
 _ENDPOINT = "https://api.anthropic.com/v1/messages"
+_MODELS_ENDPOINT = "https://api.anthropic.com/v1/models?limit=100"
 _API_VERSION = "2023-06-01"
 
 # Claude 4.7+ / Claude 5 models reject sampling params (temperature/top_p/top_k)
@@ -42,6 +48,18 @@ class AnthropicProvider(Provider):
         "claude-sonnet-4-6",
         "claude-haiku-4-5",
     ]
+    can_list_models = True
+
+    def fetch_models(self, api_key: str = "") -> List[ModelInfo]:
+        if not api_key:
+            raise LLMError("An Anthropic API key is needed to list models.")
+        data = http_get_json(_MODELS_ENDPOINT, headers={
+            "x-api-key": api_key,
+            "anthropic-version": _API_VERSION,
+        })
+        # The API already returns newest first; every entry is a chat model.
+        return [ModelInfo(id=e["id"], name=e.get("display_name") or e["id"])
+                for e in data.get("data", []) if e.get("id")]
 
     def chat(self, request: ChatRequest, api_key: str) -> str:
         if not api_key:
