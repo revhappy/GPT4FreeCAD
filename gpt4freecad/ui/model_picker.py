@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from .qt import QtCore, QtWidgets, exec_dialog
+from . import theme
 
 
 def _context_text(tokens: int) -> str:
@@ -79,7 +80,7 @@ class ModelPicker(QtWidgets.QDialog):
         toggles.addWidget(self._json_only)
         toggles.addStretch(1)
         self._count = QtWidgets.QLabel()
-        self._count.setStyleSheet("color: gray;")
+        self._count.setStyleSheet(f"color: {theme.muted(self)};")
         toggles.addWidget(self._count)
         layout.addLayout(toggles)
 

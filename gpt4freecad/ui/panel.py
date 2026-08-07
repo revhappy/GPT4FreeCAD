@@ -10,10 +10,12 @@ from .qt import QtCore, QtGui, QtWidgets
 from .worker import LLMWorker
 from .settings import open_settings
 from .engineering import EngineeringWidget
+from .plan_table import PlanTable
+from . import theme
 from ..config import get_config
 from ..llm import all_providers, get_provider
 from .. import engine, harness
-from ..cad import prompts, schema, templates
+from ..cad import describe, prompts, schema, templates
 
 _UNITS = ["mm", "cm", "m", "in"]
 _MODES = [("Structured", "structured"),
@@ -23,7 +25,7 @@ _MODE_INDEX = {m[1]: i for i, m in enumerate(_MODES)}
 # Gemini 3 reasoning depth. "Default" = let the model decide (don't send the param).
 _THINKING = [("Default", "default"), ("Minimal", "minimal"), ("Low", "low"),
              ("Medium", "medium"), ("High", "high")]
-_UI_VERSION = "compact-6"
+_UI_VERSION = "compact-7"
 # Shown in the model dropdown when the local provider has no .gguf chosen yet.
 _NO_LOCAL_MODEL = "(choose a model…)"
 # Keep this many recent conversation messages (user + assistant); older turns
@@ -32,6 +34,14 @@ _HISTORY_MAX = 24
 
 
 class GPTPanel(QtWidgets.QWidget):
+    # Class defaults, because Qt delivers changeEvent during _build_ui - the
+    # first setStyleSheet is itself a style change - and again from inside
+    # ensurePolished. Without these, recolouring runs before the widgets it
+    # recolours exist, and then recurses into itself.
+    _themable = False   # the labels _apply_theme touches are not built yet
+    _theming = False    # _apply_theme is already running
+    _status_error = False
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cfg = get_config()
@@ -211,7 +221,24 @@ class GPTPanel(QtWidgets.QWidget):
         mono.setFixedPitch(True)
         self.preview.setFont(mono)
         self.preview.setMinimumSize(0, 0)
-        casual_layout.addWidget(self.preview, 1)
+
+        # The table reads the plan, the JSON edits it. Both, in a splitter, so
+        # the user decides which one they are mostly working in - and the JSON
+        # stays the single source of truth, with the table following its text
+        # rather than holding a second copy of the program.
+        self.plan_table = PlanTable()
+        self.plan_table.setToolTip(
+            "The plan in readable form. Edit the JSON below to change it.")
+        self.preview.textChanged.connect(self._refresh_plan_table)
+        self.plan_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.plan_split.setChildrenCollapsible(True)
+        self.plan_split.setHandleWidth(3)
+        self.plan_split.addWidget(self.plan_table)
+        self.plan_split.addWidget(self.preview)
+        self.plan_split.setStretchFactor(0, 3)
+        self.plan_split.setStretchFactor(1, 2)
+        self.plan_split.setMinimumSize(0, 0)
+        casual_layout.addWidget(self.plan_split, 1)
         self.stack.addWidget(casual)
 
         self.eng = EngineeringWidget(self)
@@ -251,11 +278,46 @@ class GPTPanel(QtWidgets.QWidget):
         root.addLayout(buttons)
 
         self.status = QtWidgets.QLabel("Ready.")
-        self.status.setStyleSheet("color: gray;")
         self.status.setMaximumHeight(14)
         root.addWidget(self.status)
 
+        self._themable = True
+        self._apply_theme()
         self._reload_templates()
+
+    # ------------------------------------------------------------------ #
+    # Theme
+    # ------------------------------------------------------------------ #
+    def _apply_theme(self):
+        """Recolour the secondary labels for the theme that is loaded.
+
+        See :mod:`gpt4freecad.ui.theme`: FreeCAD's stylesheets move the
+        background far enough between themes that a fixed grey is legible in
+        one and invisible in the other.
+        """
+        if not self._themable or self._theming:
+            return
+        self._theming = True
+        try:
+            muted = f"color: {theme.muted(self)};"
+            for label in (self.usage_label, self.prompt_status):
+                label.setStyleSheet(muted)
+            self.status.setStyleSheet(
+                f"color: {theme.danger(self)};" if self._status_error else muted)
+        finally:
+            self._theming = False
+
+    def changeEvent(self, event):
+        if event.type() in (QtCore.QEvent.PaletteChange,
+                            QtCore.QEvent.StyleChange):
+            self._apply_theme()
+        super().changeEvent(event)
+
+    def showEvent(self, event):
+        # A widget only inherits the stylesheet's colours once it is polished
+        # inside the window, which has not happened while _build_ui runs.
+        self._apply_theme()
+        super().showEvent(event)
 
     # ------------------------------------------------------------------ #
     # Thinking + prompt tabs
@@ -271,8 +333,7 @@ class GPTPanel(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(1)
 
-        self.usage_label = QtWidgets.QLabel("")
-        self.usage_label.setStyleSheet("color: gray;")
+        self.usage_label = QtWidgets.QLabel("")  # coloured by _apply_theme
         self.usage_label.setVisible(False)
         layout.addWidget(self.usage_label)
 
@@ -297,8 +358,7 @@ class GPTPanel(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(1)
 
-        self.prompt_status = QtWidgets.QLabel("")
-        self.prompt_status.setStyleSheet("color: gray;")
+        self.prompt_status = QtWidgets.QLabel("")  # coloured by _apply_theme
         self.prompt_status.setWordWrap(True)
         layout.addWidget(self.prompt_status)
 
@@ -524,6 +584,9 @@ class GPTPanel(QtWidgets.QWidget):
         is_struct = mode == "structured"
         is_eng = mode == "engineering"
         self.stack.setCurrentIndex(1 if is_eng else 0)
+        # Python mode has no operations to tabulate, and the engineering
+        # timeline is its own view of the same thing.
+        self.plan_table.setVisible(is_struct)
         self.units_label.setVisible(is_struct or is_eng)
         self.units_combo.setVisible(is_struct or is_eng)
         self.print_check.setVisible(is_struct or is_eng)
@@ -535,12 +598,14 @@ class GPTPanel(QtWidgets.QWidget):
         self.generate_btn.setText(self._generate_idle_label())
         # Each mode has its own prompt; the tab must follow the mode.
         self._refresh_prompt_tab()
+        self._refresh_plan_table()
 
     def _on_units_changed(self, text):
         if self._loading:
             return
         self.cfg.set_units(text)
         self._refresh_prompt_tab()  # units are quoted in the built-in prompt
+        self._refresh_plan_table()  # every dimension in the table is in them
 
     def _on_print_toggled(self, checked):
         if not self._loading:
@@ -658,6 +723,46 @@ class GPTPanel(QtWidgets.QWidget):
         except schema.SchemaError as exc:
             self._log_error(f"Plan is not a valid program: {exc}")
             return None
+
+    # ------------------------------------------------------------------ #
+    # Plan table
+    # ------------------------------------------------------------------ #
+    def _refresh_plan_table(self):
+        """Redraw the table from whatever is in the plan box at this instant.
+
+        Driven by the box's own ``textChanged``, so it tracks a generated plan,
+        a loaded template and a hand edit through one path. A plan that will
+        not parse is reported rather than left stale - a table showing the
+        previous plan beside JSON that no longer says that is a lie the user
+        would act on.
+        """
+        if self._current_mode() != "structured":
+            return
+        text = self.preview.toPlainText().strip()
+        if not text:
+            self.plan_table.set_message("The plan appears here, one row per step.")
+            return
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            self.plan_table.set_message(
+                f"Not valid JSON yet - {exc.msg}, line {exc.lineno}.")
+            return
+        operations = describe.operations_of(data)
+        if not operations:
+            self.plan_table.set_message("This plan has no operations.")
+            return
+        # Describe first, validate second: a plan the validator rejects is
+        # exactly when seeing it laid out helps most, so the complaint goes
+        # underneath the rows instead of replacing them.
+        note = ""
+        try:
+            schema.validate_program(data)
+        except schema.SchemaError as exc:
+            note = f"Will not build: {exc}"
+        self.plan_table.set_rows(
+            describe.plan_rows(operations, self.units_combo.currentText()),
+            note=note)
 
     # ------------------------------------------------------------------ #
     # Shared generation context + worker
@@ -1160,7 +1265,9 @@ class GPTPanel(QtWidgets.QWidget):
 
     def _set_status(self, text, error=False):
         self.status.setText(text)
-        self.status.setStyleSheet("color: #c0392b;" if error else "color: gray;")
+        self._status_error = error
+        self.status.setStyleSheet(
+            f"color: {theme.danger(self) if error else theme.muted(self)};")
 
     def _append(self, html):
         self.log.append(html)
@@ -1171,10 +1278,13 @@ class GPTPanel(QtWidgets.QWidget):
         self._append(f'<p style="margin:2px 0;"><b>You:</b> {_esc(text)}</p>')
 
     def _log_system(self, text):
-        self._append(f'<p style="margin:2px 0; color:#2c3e50;">{_esc(text)}</p>')
+        # Deliberately uncoloured: the theme's own text colour is the only one
+        # guaranteed to be readable on the theme's own background.
+        self._append(f'<p style="margin:2px 0;">{_esc(text)}</p>')
 
     def _log_error(self, text):
-        self._append(f'<p style="margin:2px 0; color:#c0392b;"><b>Error:</b> {_esc(text)}</p>')
+        self._append(f'<p style="margin:2px 0; color:{theme.danger(self.log)};">'
+                     f'<b>Error:</b> {_esc(text)}</p>')
         self.output_tabs.setCurrentIndex(0)
 
 

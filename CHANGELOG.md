@@ -1,5 +1,43 @@
 # GPT4FreeCAD Changelog
 
+## [2.9.0] - 2026-08-07
+
+Shows the plan as something you can read, and stops writing text the theme
+paints out.
+
+### Added
+- **The plan, as a table.** Structured mode now shows the program as one row per
+  step — number, operation, the object it makes, and a plain description — above
+  the JSON rather than instead of it. `{"op": "cylinder", "radius": 6, "height":
+  12}` reads as `Ø12 × 12 mm`: radii become diameters, because that is how a part
+  is specified; vectors like `[0, 0, 1]` become `+Z`, but a diagonal keeps its
+  numbers rather than getting a made-up name; a full 360° sweep is not mentioned
+  and a partial one is. The object nothing later consumes — the thing you are
+  actually getting — is shown in bold, and every row carries its own JSON as a
+  tooltip.
+- The table follows the plan box's text, so it tracks a generated plan, a loaded
+  template and a hand edit through one path, and the JSON stays the single
+  source of truth. It is deliberately tolerant: a half-typed plan says so, a plan
+  that parses but would not build is still drawn with the validator's complaint
+  underneath it, and an operation the schema does not know still lists its
+  fields. A table that goes blank while you are typing would be worse than one
+  that says the plan is odd.
+- The descriptions live in `cad/describe.py`, which imports neither Qt nor
+  FreeCAD, so they are unit-tested — including a test that fails if an operation
+  is ever added to the schema without wording to go with it.
+
+### Fixed
+- **Text the dark theme made invisible.** The Activity log wrote its messages in
+  a hardcoded `#2c3e50`. Measured inside FreeCAD Dark, the log sits on `#191919`
+  — a contrast ratio of 1.4:1, which is text that is present in the widget and
+  not on the screen. Ordinary log lines now set no colour at all and inherit the
+  theme's, which is right in every theme and needs no maintaining.
+- Errors, the status line and the secondary labels take their colour from the
+  palette the active theme installed (`ui/theme.py`) instead of from literals.
+  One red cannot serve both themes: anything legible on near-black is washed out
+  on white. These are picked per theme and re-derived if the theme changes while
+  the panel is open.
+
 ## [2.8.0] - 2026-08-06
 
 Stops hiding behind the workbench selector, and stops hiding what the model is

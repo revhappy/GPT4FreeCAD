@@ -8,7 +8,7 @@ from functools import partial
 from .qt import QtCore, QtGui, QtWidgets, exec_dialog
 from .model_picker import choose_model
 from .worker import LLMWorker
-from . import startup
+from . import startup, theme
 from ..config import get_config
 from ..llm import all_providers, get_provider, ChatRequest
 from ..llm.base import LLMError
@@ -124,7 +124,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
             self._machine_status = QtWidgets.QLabel()
             self._machine_status.setWordWrap(True)
-            self._machine_status.setStyleSheet("color: gray;")
+            self._machine_status.setStyleSheet(f"color: {theme.muted(self)};")
             self._machine_unload = QtWidgets.QPushButton("Unload")
             self._machine_unload.setToolTip(
                 "Stop the local model server and free its memory. It reloads "
