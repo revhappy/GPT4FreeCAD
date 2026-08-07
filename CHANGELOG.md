@@ -1,5 +1,42 @@
 # GPT4FreeCAD Changelog
 
+## [2.10.0] - 2026-08-07
+
+Picking a model stops being a trip into Settings, and the scroll wheel stops
+rewriting your work on the way past.
+
+### Added
+- **A model you pick stays in the panel's dropdown.** The list used to be a
+  provider's hardcoded defaults plus whichever model was selected right now, so
+  a model found through Settings' picker vanished from the list the moment you
+  switched to another one — and getting back to it meant another trip through
+  the picker. Picking a model now adds it permanently, whether it was chosen in
+  Settings, selected in the panel, or typed in. So does the model already in
+  use, which is what stops the one you were on disappearing behind the one you
+  just chose.
+- **Every `.gguf` on this machine is in the dropdown**, from the same scan
+  Settings' "Find models" already used — LM Studio, GPT4All, Hugging Face and
+  llama.cpp caches. That is a handful of files and they are genuinely all
+  yours, so all of them are listed; the result is cached and re-scanned on a
+  worker thread behind the dropdown, because walking the disk cannot happen
+  while the panel is being built. Choosing one now writes its path, instead of
+  the selection being ignored because "the model is set in Settings".
+- A provider's *catalogue* is deliberately not listed. OpenRouter alone returns
+  400 models, which is a worse dropdown than the one this replaces — the point
+  is the short list of models you actually use, not a directory.
+- Remembered models are capped at 30 per provider, oldest dropped first.
+
+### Fixed
+- **The scroll wheel no longer edits what it passes over.** Qt sends a wheel
+  event to whatever combo box or spin box is under the pointer whether or not
+  it has focus, so scrolling the panel silently switched provider or model —
+  and the page did not move, because the control had eaten the event. Wheel
+  events now reach a combo box, spin box, slider or tab bar only when it
+  actually has focus, and are handed to the scrolling widget behind otherwise.
+  Applied to the panel, the settings dialog and the engineering step form,
+  whole-window rather than per control, so a control added later cannot quietly
+  reintroduce it.
+
 ## [2.9.0] - 2026-08-07
 
 Shows the plan as something you can read, and stops writing text the theme

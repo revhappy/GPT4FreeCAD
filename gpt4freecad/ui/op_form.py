@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from .qt import QtWidgets
+from .qt import QtWidgets, guard_wheel
 from ..cad import schema
 
 
@@ -54,6 +54,10 @@ class OpForm(QtWidgets.QWidget):
         self.values = dict(values or {})
         self._fields = []  # (field, kind, optional, getter, include_cb)
         self._build()
+        # This form lives inside the timeline's scroll area and is almost
+        # entirely spin boxes - scrolling past it must not silently retype the
+        # dimensions of the step being edited.
+        guard_wheel(self)
 
     # ------------------------------------------------------------------ #
     def _build(self):

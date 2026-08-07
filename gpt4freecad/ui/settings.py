@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from functools import partial
 
-from .qt import QtCore, QtGui, QtWidgets, exec_dialog
+from .qt import QtCore, QtGui, QtWidgets, exec_dialog, guard_wheel
 from .model_picker import choose_model
 from .worker import LLMWorker
 from . import startup, theme
@@ -36,6 +36,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.setWindowTitle("GPT4FreeCAD - Settings")
         self.resize(560, 600)
         self._build()
+        # This dialog scrolls and is mostly dropdowns and spin boxes; the wheel
+        # belongs to the page, not to whichever one is under the pointer.
+        guard_wheel(self)
 
     # ------------------------------------------------------------------ #
     def _build(self):
@@ -602,7 +605,12 @@ class SettingsDialog(QtWidgets.QDialog):
         for pid, edit in self._key_edits.items():
             self.cfg.set_api_key(pid, edit.text())
         for pid, combo in self._model_combos.items():
-            self.cfg.set_model(pid, combo.currentText().strip())
+            model = combo.currentText().strip()
+            self.cfg.set_model(pid, model)
+            # Saving a model here is what puts it on the panel's dropdown for
+            # good, so a model found through the picker never has to be hunted
+            # down a second time.
+            self.cfg.remember_model(pid, model)
         if hasattr(self, "_endpoint_edit"):
             self.cfg.set_openai_endpoint(self._endpoint_edit.text().strip())
         if hasattr(self, "_localserver_url"):

@@ -6,7 +6,7 @@ import json
 import os
 from functools import partial
 
-from .qt import QtCore, QtGui, QtWidgets
+from .qt import QtCore, QtGui, QtWidgets, guard_wheel
 from .worker import LLMWorker
 from .settings import open_settings
 from .engineering import EngineeringWidget
@@ -53,6 +53,8 @@ class GPTPanel(QtWidgets.QWidget):
         self._original_request = ""   # the user's own words, not a repair prompt
         self._review_of = None        # fingerprint of a program under review
         self._repair = harness.RepairSession(self.cfg.repair_rounds())
+        self._models_refreshed = set()   # provider ids re-scanned this session
+        self._model_workers = {}         # keeps refresh threads alive in flight
         self._loading = True
         self._build_ui()
         self._load_state()
@@ -120,6 +122,11 @@ class GPTPanel(QtWidgets.QWidget):
         self.model_combo.setToolTip("Model")
         self.model_combo.setEditable(True)
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
+        # Commit signals, not every keystroke: a model is "picked" when it is
+        # chosen from the list or an edit is finished, and only then is it
+        # worth keeping on the dropdown for next time.
+        self.model_combo.activated.connect(self._remember_current_model)
+        self._wire_model_commit()
         header.addWidget(self.model_combo, 3)
 
         self.settings_btn = QtWidgets.QToolButton()
@@ -283,6 +290,9 @@ class GPTPanel(QtWidgets.QWidget):
 
         self._themable = True
         self._apply_theme()
+        # The panel is a tall, narrow dock full of dropdowns. Scrolling it must
+        # scroll it, not spin whatever control happens to be under the pointer.
+        guard_wheel(self)
         self._reload_templates()
 
     # ------------------------------------------------------------------ #
@@ -458,6 +468,7 @@ class GPTPanel(QtWidgets.QWidget):
     # State load / persistence
     # ------------------------------------------------------------------ #
     def _load_state(self):
+        self._drop_catalogue_cache()
         pid = self.cfg.provider()
         idx = self.provider_combo.findData(pid)
         if idx >= 0:
@@ -494,34 +505,176 @@ class GPTPanel(QtWidgets.QWidget):
                 "run a model on this machine with no key and no cloud. Then describe a "
                 "part below.")
 
+    def _drop_catalogue_cache(self):
+        """Discard a cloud catalogue cached by an earlier version.
+
+        2.10.0 briefly cached each provider's whole catalogue under the same
+        key the local scan uses - hundreds of entries per provider, sitting in
+        the config file for a dropdown that no longer reads them. Nothing needs
+        that data now, so clear it rather than leave it behind.
+        """
+        for provider in all_providers():
+            if provider.id != "machine" and self.cfg.discovered_models(provider.id):
+                self.cfg.set_discovered_models(provider.id, [])
+
     def _populate_models(self):
+        """Fill the dropdown with every model we know this provider has.
+
+        Choosing a model is the single most common thing anyone does here, and
+        it used to mean opening Settings and hunting: the panel listed only a
+        provider's hardcoded defaults, and exactly one entry - the file chosen
+        in Settings - for the local provider.
+
+        What goes in depends on what "all your models" honestly means for the
+        provider:
+
+        * local - every .gguf found on this machine. That is a handful of
+          files, and they are genuinely all yours.
+        * cloud - the built-in defaults plus every model you have picked
+          before. *Not* the provider's catalogue: OpenRouter alone lists 400
+          models, which is a worse dropdown than the one this replaced. Picking
+          a model adds it here permanently, so it is still on the list after
+          you switch away and back.
+
+        The local list is cached and refreshed behind the dropdown (see
+        :meth:`_refresh_models`), because scanning the disk cannot happen while
+        the panel is being built.
+        """
         provider = self._current_provider()
+        known = self.cfg.discovered_models(provider.id)
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
+        # A cloud model id can be typed; a local one is a file on this machine,
+        # and typing its description would not name anything.
+        self.model_combo.setEditable(provider.id != "machine")
+        self._wire_model_commit()  # setEditable rebuilds the line edit
+
         if provider.id == "machine":
-            # A local provider has no catalogue to list: the "model" is whichever
-            # .gguf file was chosen in Settings. Show its filename, so the panel
-            # states what will actually run instead of sitting empty.
+            # The "model" is a .gguf on this machine, so the entry carries the
+            # path as its data and a readable description as its label - a bare
+            # filename says nothing about size or where it came from.
             path = self.cfg.machine_model_path()
-            label = os.path.basename(path) if path else _NO_LOCAL_MODEL
-            self.model_combo.addItem(label)
-            self.model_combo.setCurrentText(label)
+            for label, value in known:
+                self.model_combo.addItem(label, value)
+            if path and self.model_combo.findData(path) < 0:
+                self.model_combo.insertItem(0, os.path.basename(path), path)
+            if self.model_combo.count() == 0:
+                self.model_combo.addItem(_NO_LOCAL_MODEL, "")
+            index = self.model_combo.findData(path) if path else -1
+            self.model_combo.setCurrentIndex(max(index, 0))
             self.model_combo.setToolTip(
-                path or "Open Settings (…) and choose a .gguf model file.")
+                path or "No local model yet — models found on this computer "
+                        "appear here.")
         else:
             saved = self.cfg.model(provider.id, provider.default_model)
+            # The model in use counts as picked, even if it was set before this
+            # list existed or chosen in Settings. Without this it would be on
+            # the dropdown only while it stayed selected, and would vanish the
+            # moment you switched to another one - which is the whole problem.
+            # Guarded so a model already on the list is not reordered on every
+            # repopulate.
+            remembered = self.cfg.remembered_models(provider.id)
+            if (saved and saved not in provider.default_models
+                    and saved not in [value for _label, value in remembered]):
+                self.cfg.remember_model(provider.id, saved)
+                remembered = self.cfg.remembered_models(provider.id)
+
+            # Defaults first - they are the curated, known-good ones - then
+            # everything this user has picked before, minus duplicates.
             items = list(provider.default_models)
+            for _label, value in remembered:
+                if value not in items:
+                    items.append(value)
             # A provider whose models all come from a live catalogue (Ollama /
             # LM Studio) ships no defaults, so without this the dropdown would
             # be empty even though a model is configured.
             if saved and saved not in items:
                 items.insert(0, saved)
-            self.model_combo.addItems(items)
+            for value in items:
+                self.model_combo.addItem(value, value)
             self.model_combo.setCurrentText(saved)
             self.model_combo.setToolTip(
-                "Model — pick a different one in Settings (…)"
-                if provider.can_list_models else "Model")
+                "Model — pick a new one in Settings (…) and it stays on this list")
+
         self.model_combo.blockSignals(False)
+        self._refresh_models()
+
+    def _refresh_models(self):
+        """Re-scan this machine for local models, in the background, once.
+
+        Local only. A cloud provider's catalogue is deliberately *not* fetched
+        here: it is hundreds of entries, and a dropdown of hundreds is worse
+        than the short one it would replace. Cloud models reach the dropdown by
+        being picked - see :meth:`_remember_current_model`.
+
+        Deliberately quiet. It runs on its own thread so the panel never
+        blocks, it leaves the current selection alone, and a failure is not
+        reported: the dropdown already holds the cached list, so there is
+        nothing for the user to do about it and nothing to interrupt them for.
+
+        Once per session, because the disk does not change underneath us often
+        enough to be worth re-walking on every provider switch.
+        """
+        provider = self._current_provider()
+        if provider.id != "machine" or provider.id in self._models_refreshed:
+            return
+
+        from ..llm import discovery
+
+        self._models_refreshed.add(provider.id)
+        worker = LLMWorker(discovery.local_models, self)
+        worker.succeeded.connect(partial(self._on_models_found, provider.id))
+        # Silent by design - see the docstring.
+        worker.failed.connect(lambda _message: None)
+        # Held on the panel so the thread is not collected mid-flight.
+        self._model_workers[provider.id] = worker
+        worker.start()
+
+    def _on_models_found(self, provider_id, found):
+        """Cache the local scan's result and redraw the dropdown."""
+        from ..llm import discovery
+
+        entries = [[discovery.describe(m), m["path"]] for m in (found or [])
+                   if m.get("path")]
+        if not entries:
+            return
+
+        previous = self.cfg.discovered_models(provider_id)
+        self.cfg.set_discovered_models(provider_id, entries)
+        # Only redraw if this is still the provider on screen, and only if the
+        # list actually changed - repopulating fights a user mid-selection.
+        if previous != entries and self.provider_combo.currentData() == provider_id:
+            selected = self.model_combo.currentText()
+            self._populate_models()
+            if selected and self.model_combo.findText(selected) >= 0:
+                self.model_combo.setCurrentText(selected)
+
+    def _wire_model_commit(self):
+        """Connect the editor's commit signal, once per editor.
+
+        Toggling the combo between editable and not destroys and rebuilds its
+        line edit, so this has to run again after every such switch - and must
+        not connect twice to an editor it has already wired, or a single commit
+        would be recorded twice.
+        """
+        editor = self.model_combo.lineEdit()
+        if editor is not None and not editor.property("gpt4freecad_wired"):
+            editor.setProperty("gpt4freecad_wired", True)
+            editor.editingFinished.connect(self._remember_current_model)
+
+    def _remember_current_model(self, *_args):
+        """Keep a model the user has settled on, so it stays in the dropdown.
+
+        Wired to *commit* signals only - picking from the list, or finishing an
+        edit - never to ``currentTextChanged``, which fires on every keystroke
+        and would remember "g", "gp", "gpt-" on the way to a model name.
+        """
+        provider_id = self.provider_combo.currentData()
+        if self._loading or provider_id == "machine":
+            return  # a local model is a file, already handled by the scan
+        model = self.model_combo.currentText().strip()
+        if model:
+            self.cfg.remember_model(provider_id, model)
 
     def _any_key_set(self) -> bool:
         return any(self.cfg.api_key(p.id) for p in all_providers())
@@ -560,7 +713,14 @@ class GPTPanel(QtWidgets.QWidget):
             return
         provider_id = self.provider_combo.currentData()
         if provider_id == "machine":
-            return  # the local "model" is the file path, set in Settings
+            # The local "model" is a file, and the entry's label describes it
+            # rather than naming it - so the choice is the item's data, and it
+            # is saved straight from here instead of only from Settings.
+            path = self.model_combo.currentData()
+            if path:
+                self.cfg.set_machine_model_path(path)
+                self.model_combo.setToolTip(path)
+            return
         self.cfg.set_model(provider_id, text.strip())
 
     def _on_mode_changed(self, _index):

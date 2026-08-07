@@ -151,6 +151,66 @@ class Config:
     def set_model(self, provider_id: str, model: str) -> None:
         self._b.set_str(f"model_{provider_id}", model)
 
+    # Enough to keep a working set of models to hand without the dropdown
+    # turning into a catalogue. Oldest is dropped first.
+    _REMEMBERED_MAX = 30
+
+    def _pairs(self, key: str) -> list:
+        """A stored list of ``[label, value]`` pairs, or [] if unreadable."""
+        raw = self._b.get_str(key, "")
+        if not raw:
+            return []
+        try:
+            entries = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(entries, list):
+            return []
+        return [[str(e[0]), str(e[1])] for e in entries
+                if isinstance(e, (list, tuple)) and len(e) == 2]
+
+    def _set_pairs(self, key: str, entries) -> None:
+        pairs = [[str(label), str(value)] for label, value in (entries or [])]
+        self._b.set_str(
+            key, json.dumps(pairs, separators=(",", ":")) if pairs else "")
+
+    def discovered_models(self, provider_id: str) -> list:
+        """Local .gguf files found by the last scan, as ``[label, path]``.
+
+        Only the local provider has these. Scanning the disk cannot happen
+        while the panel is being built, so the last answer is cached and the
+        dropdown is complete the instant the panel opens.
+        """
+        return self._pairs(f"models_{provider_id}")
+
+    def set_discovered_models(self, provider_id: str, entries) -> None:
+        self._set_pairs(f"models_{provider_id}", entries)
+
+    def remembered_models(self, provider_id: str) -> list:
+        """Models the user has actually picked for this provider.
+
+        A provider's catalogue can run to hundreds of entries, which is a
+        terrible dropdown and not what anyone means by "my models". This is the
+        short list instead: once you choose a model - in Settings, or by typing
+        it into the panel - it stays in the dropdown, so switching back to it
+        later is one click rather than another trip through the picker.
+        """
+        return self._pairs(f"picked_{provider_id}")
+
+    def remember_model(self, provider_id: str, value: str, label: str = "") -> None:
+        """Add a model to the remembered list, most recently picked last."""
+        value = (value or "").strip()
+        if not value:
+            return
+        entries = [e for e in self.remembered_models(provider_id) if e[1] != value]
+        entries.append([label.strip() or value, value])
+        self._set_pairs(f"picked_{provider_id}",
+                        entries[-self._REMEMBERED_MAX:])
+
+    def forget_model(self, provider_id: str, value: str) -> None:
+        entries = [e for e in self.remembered_models(provider_id) if e[1] != value]
+        self._set_pairs(f"picked_{provider_id}", entries)
+
     def openai_endpoint(self) -> str:
         return self._b.get_str(
             "openai_endpoint", "https://api.openai.com/v1/chat/completions"
