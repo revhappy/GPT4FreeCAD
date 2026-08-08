@@ -11,7 +11,7 @@ from .worker import LLMWorker
 from .settings import open_settings
 from .engineering import EngineeringWidget
 from .plan_table import PlanTable
-from . import theme
+from . import op_form, theme
 from ..config import get_config
 from ..llm import all_providers, get_provider
 from .. import engine, harness
@@ -229,13 +229,17 @@ class GPTPanel(QtWidgets.QWidget):
         self.preview.setFont(mono)
         self.preview.setMinimumSize(0, 0)
 
-        # The table reads the plan, the JSON edits it. Both, in a splitter, so
-        # the user decides which one they are mostly working in - and the JSON
-        # stays the single source of truth, with the table following its text
-        # rather than holding a second copy of the program.
+        # Both panes edit the plan; the JSON stays the single source of truth,
+        # and the table reads from and writes back to that same text rather
+        # than holding a second copy of the program. Editing through the table
+        # is the path that matters - someone who wants a 60mm plate to be 80mm
+        # should not have to be comfortable in JSON to say so.
         self.plan_table = PlanTable()
         self.plan_table.setToolTip(
-            "The plan in readable form. Edit the JSON below to change it.")
+            "The plan, step by step. Double-click a step to change it, "
+            "Delete to remove it.")
+        self.plan_table.editRequested.connect(self._edit_plan_step)
+        self.plan_table.removeRequested.connect(self._remove_plan_step)
         self.preview.textChanged.connect(self._refresh_plan_table)
         self.plan_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self.plan_split.setChildrenCollapsible(True)
@@ -923,6 +927,83 @@ class GPTPanel(QtWidgets.QWidget):
         self.plan_table.set_rows(
             describe.plan_rows(operations, self.units_combo.currentText()),
             note=note)
+
+    # ------------------------------------------------------------------ #
+    # Editing the plan through the table
+    # ------------------------------------------------------------------ #
+    def _read_plan(self):
+        """The plan box as ``(data, operations)``, or ``(None, None)``.
+
+        Both are needed on the way back out: a plan can be a bare list or a
+        ``{"operations": [...]}`` object, and rewriting one shape as the other
+        would quietly discard whatever else the object carried.
+        """
+        text = self.preview.toPlainText().strip()
+        if not text:
+            return None, None
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None, None
+        operations = describe.operations_of(data)
+        return (data, operations) if operations else (None, None)
+
+    def _write_plan(self, data, operations) -> None:
+        """Put an edited program back in the plan box.
+
+        Setting the text is the whole update: ``textChanged`` redraws the table
+        from it, so the table cannot drift from the JSON even for a frame.
+        """
+        if isinstance(data, dict):
+            data["operations"] = operations
+        else:
+            data = operations
+        self.preview.setPlainText(json.dumps(data, indent=2))
+
+    def _edit_plan_step(self, step: int) -> None:
+        """Open step ``step`` in a form of typed controls."""
+        data, operations = self._read_plan()
+        if operations is None or not (0 <= step < len(operations)):
+            return
+
+        # Only names defined *earlier* can be referred to by this step, so the
+        # dialog offers exactly those - which is also what stops an edit
+        # creating a reference to something built after it.
+        defined = [op.get("name") for op in operations[:step]
+                   if isinstance(op, dict) and op.get("name")]
+
+        edited = op_form.edit_op(operations[step], defined_names=defined,
+                                 parent=self)
+        if edited is None:
+            if isinstance(operations[step], dict) and \
+                    operations[step].get("op") not in schema.OPERATIONS:
+                self._set_status(
+                    f"This build has no form for '{operations[step].get('op')}'"
+                    " - edit it in the plan below.", error=True)
+            return
+
+        operations[step] = edited
+        self._write_plan(data, operations)
+
+    def _remove_plan_step(self, step: int) -> None:
+        """Delete step ``step``, after asking."""
+        data, operations = self._read_plan()
+        if operations is None or not (0 <= step < len(operations)):
+            return
+
+        op = operations[step]
+        label = op.get("name") or op.get("op") if isinstance(op, dict) else "?"
+        answer = QtWidgets.QMessageBox.question(
+            self, "Delete step",
+            f"Delete step {step + 1}, '{label}'?\n\n"
+            "Any later step that used it will need editing too.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No)
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+
+        del operations[step]
+        self._write_plan(data, operations)
 
     # ------------------------------------------------------------------ #
     # Shared generation context + worker

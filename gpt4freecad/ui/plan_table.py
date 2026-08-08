@@ -1,10 +1,19 @@
-"""The plan, as a table you can read instead of JSON you have to parse.
+"""The plan, as a table you can read and change instead of JSON you have to edit.
 
 Sits above the plan box in structured mode and follows whatever is in it - the
 model's reply, a template, or a hand edit half-typed. It never validates and
 never blocks anything: a plan that will not parse gets a note saying so, and a
 plan that parses but would not build is still drawn, with the validator's
 complaint underneath it.
+
+It is also where the plan gets edited. Most people who need to change a plan
+are not going to do it in JSON: they want the plate 80mm rather than 60mm, and
+asking them to find the right ``"length"`` in a block of braces and not break a
+comma on the way out is asking them to be a programmer to use a CAD program.
+So a row opens a form of typed controls, and Delete removes the step. The JSON
+box stays - it is still the fastest way in for anyone who does think in JSON,
+and it remains the single source of truth that this table both reads and writes
+back to, so the two can never disagree.
 
 The note is a label rather than a row of the table on purpose. A validator
 message is a sentence, and a sentence in a cell either forces the first column
@@ -30,7 +39,17 @@ _STRIPE_PERCENT = 7
 
 
 class PlanTable(QtWidgets.QWidget):
-    """Read-only view of an IR program. See :mod:`gpt4freecad.cad.describe`."""
+    """Editable view of an IR program. See :mod:`gpt4freecad.cad.describe`.
+
+    Emits step numbers, not operations. The table holds no copy of the program:
+    it is drawn from the plan box's text and says which row the user acted on,
+    and the panel goes back to that text to make the change. Anything else
+    would mean two versions of the plan and a bug about which one built.
+    """
+
+    # 0-based index into the program's operation list.
+    editRequested = QtCore.Signal(int)
+    removeRequested = QtCore.Signal(int)
 
     # Class defaults: Qt can deliver changeEvent from inside a constructor and
     # from inside ensurePolished, so theming has to be safe before (and
@@ -67,6 +86,16 @@ class PlanTable(QtWidgets.QWidget):
             header.setSectionResizeMode(
                 column, QtWidgets.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(_DETAILS, QtWidgets.QHeaderView.Stretch)
+
+        # Editing. Double-click is the discoverable gesture and Enter is the
+        # keyboard one; both land on the same slot. The cells themselves stay
+        # non-editable (NoEditTriggers, above) on purpose - "60 x 40 x 10" is a
+        # sentence describing three separate numbers, and letting someone retype
+        # it in place would mean parsing prose back into fields.
+        self.table.itemDoubleClicked.connect(self._on_activated)
+        self.table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_menu)
+        self.table.installEventFilter(self)
 
         self.note = QtWidgets.QLabel()
         self.note.setWordWrap(True)
@@ -135,6 +164,49 @@ class PlanTable(QtWidgets.QWidget):
         self.table.clearContents()
         self.table.setRowCount(0)
         self._set_note(text)
+
+    # ------------------------------------------------------------------ #
+    # Editing
+    # ------------------------------------------------------------------ #
+    def _selected_step(self) -> int:
+        """The 0-based operation index under the cursor, or -1."""
+        row = self.table.currentRow()
+        return row if 0 <= row < self.table.rowCount() else -1
+
+    def _on_activated(self, item=None):
+        step = item.row() if item is not None else self._selected_step()
+        if step >= 0:
+            self.editRequested.emit(step)
+
+    def _on_menu(self, point):
+        step = self.table.rowAt(point.y())
+        if step < 0:
+            return
+        self.table.selectRow(step)
+
+        menu = QtWidgets.QMenu(self)
+        edit = menu.addAction("Edit step...")
+        remove = menu.addAction("Delete step")
+        chosen = menu.exec_(self.table.viewport().mapToGlobal(point)) \
+            if hasattr(menu, "exec_") else \
+            menu.exec(self.table.viewport().mapToGlobal(point))
+        if chosen is edit:
+            self.editRequested.emit(step)
+        elif chosen is remove:
+            self.removeRequested.emit(step)
+
+    def eventFilter(self, watched, event):
+        """Enter edits the selected step, Delete removes it."""
+        if watched is self.table and event.type() == QtCore.QEvent.KeyPress:
+            step = self._selected_step()
+            if step >= 0:
+                if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                    self.editRequested.emit(step)
+                    return True
+                if event.key() == QtCore.Qt.Key_Delete:
+                    self.removeRequested.emit(step)
+                    return True
+        return super().eventFilter(watched, event)
 
     # ------------------------------------------------------------------ #
     def _set_row(self, index, row):

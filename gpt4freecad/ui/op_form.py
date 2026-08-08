@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 
-from .qt import QtWidgets, guard_wheel
+from .qt import QtWidgets, exec_dialog, guard_wheel
+from . import theme
 from ..cad import schema
 
 
@@ -166,6 +167,83 @@ class OpForm(QtWidgets.QWidget):
             op[field] = getter()
         schema.validate_op(op, self.defined_names)
         return op
+
+
+class OpDialog(QtWidgets.QDialog):
+    """One operation, in typed controls, in a box with OK and Cancel.
+
+    The plan table uses this to let a step be changed without anyone opening
+    the JSON. That is the whole point of it: the people who most need to nudge
+    a plate from 60mm to 80mm are the ones least likely to want to find the
+    third ``"length"`` in a block of JSON and edit it without breaking a comma.
+
+    Validation happens on OK rather than on every keystroke, and a rejected op
+    keeps the dialog open with the reason shown, so a half-typed value is never
+    written back over a plan that currently works.
+    """
+
+    def __init__(self, op, defined_names=None, parent=None):
+        super().__init__(parent)
+        op = dict(op or {})
+        self.op_name = op.get("op")
+
+        self.setWindowTitle(f"Edit step - {self.op_name}")
+        self.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        self.form = OpForm(self.op_name, values=op,
+                           defined_names=defined_names, parent=self)
+
+        # Some ops carry a dozen fields; a dialog that grows past the screen
+        # cannot be dismissed, so it scrolls instead.
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setWidget(self.form)
+        layout.addWidget(scroll, 1)
+
+        self.error = QtWidgets.QLabel()
+        self.error.setWordWrap(True)
+        self.error.setVisible(False)
+        layout.addWidget(self.error)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._value = None
+        self.resize(360, min(520, max(240, 90 + 34 * len(self.form._fields))))
+
+    def _on_accept(self):
+        try:
+            self._value = self.form.value()
+        except schema.SchemaError as exc:
+            self.error.setText(str(exc))
+            self.error.setStyleSheet(f"color: {theme.danger(self)};")
+            self.error.setVisible(True)
+            return
+        self.accept()
+
+    def value(self) -> dict:
+        """The edited op. Only meaningful after the dialog was accepted."""
+        return self._value
+
+
+def edit_op(op, defined_names=None, parent=None):
+    """Edit one op in a dialog. Returns the new op dict, or None if cancelled.
+
+    Returns None for an op this build has no schema for as well - a plan can
+    name an operation a newer version added, and refusing to guess at its
+    fields is better than offering an empty form that would silently drop them.
+    """
+    if not isinstance(op, dict) or op.get("op") not in schema.OPERATIONS:
+        return None
+    dialog = OpDialog(op, defined_names=defined_names, parent=parent)
+    if exec_dialog(dialog) != QtWidgets.QDialog.Accepted:
+        return None
+    return dialog.value()
 
 
 def _parse_intlist(text):
